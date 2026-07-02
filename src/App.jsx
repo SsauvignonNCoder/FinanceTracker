@@ -59,9 +59,19 @@ const CURRENCIES = [
   { code: 'TRY', label: '₺ Лира' },
 ];
 const DEFAULT_CATEGORIES = {
-  expense: ['Еда', 'Кафе/рестораны', 'Транспорт', 'Жильё', 'Здоровье', 'Спорт', 'Развлечения', 'Одежда', 'Подарки', 'Другое'],
-  income: ['Зарплата', 'Подработка', 'Возврат', 'Подарок', 'Другое'],
+  expense: [
+    'Супермаркеты', 'Фастфуд', 'Рестораны', 'Заправки', 'Автоуслуги', 'Такси',
+    'Местный транспорт', 'Транспорт', 'Авиабилеты', 'Турагенства', 'Отели',
+    'Развлечения', 'Кино', 'Онлайн-кинотеатр', 'Цифровые товары', 'Маркетплейсы',
+    'Различные товары', 'Одежда и обувь', 'Гаджеты и техника', 'Ремонт и мебель',
+    'Спорттовары', 'Цветы', 'Медицина', 'Аптеки', 'Красота', 'Сервис',
+    'Мобильная связь', 'Услуги банка', 'Госуслуги', 'Экосистема Яндекс',
+    'Животные', 'Переводы', 'Другое',
+  ],
+  income: ['Зарплата', 'Кэшбэк', 'Бонусы', 'Проценты'],
 };
+// Подкатегории — опциональны, заводятся пользователем внутри категории
+const DEFAULT_SUBCATEGORIES = { expense: {}, income: {} };
 
 /* ============================================================
    Хелперы
@@ -95,6 +105,12 @@ const fmtDate = (iso) => {
   try { return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).toUpperCase(); }
   catch { return iso; }
 };
+// Неделя с понедельника
+const addDaysISO = (iso, n) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const mondayOf = (iso) => { const d = new Date(iso + 'T00:00:00'); const off = (d.getDay() + 6) % 7; d.setDate(d.getDate() - off); return d.toISOString().slice(0, 10); };
+const fmtDM = (iso) => { try { return new Date(iso + 'T00:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }); } catch { return iso; } };
+const fmtWeekRange = (mondayIso) => `${fmtDM(mondayIso)} – ${fmtDM(addDaysISO(mondayIso, 6))}`;
+const fmtDayFull = (iso) => { try { return new Date(iso + 'T00:00:00').toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' }); } catch { return iso; } };
 
 /* ============================================================
    Курсы валют — ЦБ РФ. Рубль базовый; для остальных валют
@@ -108,16 +124,21 @@ async function fetchRates() {
   if (!res.ok) throw new Error('rates-http');
   const json = await res.json();
   const rates = { RUB: 1 };
+  const changes = {}; // код → изменение курса к рублю за сутки, %
   for (const [code, v] of Object.entries(json.Valute || {})) {
-    if (v && v.Value && v.Nominal) rates[code] = v.Value / v.Nominal; // рублей за 1 ед.
+    if (v && v.Value && v.Nominal) {
+      const cur = v.Value / v.Nominal;
+      rates[code] = cur; // рублей за 1 ед.
+      if (v.Previous) { const prev = v.Previous / v.Nominal; if (prev) changes[code] = ((cur - prev) / prev) * 100; }
+    }
   }
   let date = '';
   try { date = new Date(json.Date).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }); } catch { /* noop */ }
-  _ratesCache = { rates, date };
+  _ratesCache = { rates, date, changes };
   return _ratesCache;
 }
 function useRates() {
-  const [state, setState] = useState({ rates: null, date: '' });
+  const [state, setState] = useState({ rates: null, date: '', changes: {} });
   useEffect(() => {
     let alive = true;
     fetchRates().then((r) => { if (alive) setState(r); }).catch(() => { /* курсы недоступны — конвертер скрыт */ });
@@ -189,19 +210,22 @@ function CenterScreen({ children }) {
 /* ============================================================
    Форма добавления/редактирования транзакции
    ============================================================ */
-function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
+function TxForm({ initial, categories, subcategories, onCancel, onSave, onAddCategory, onAddSubcategory }) {
   const t = useTheme();
   const [kind, setKind] = useState(initial?.kind || 'expense');
   const [amount, setAmount] = useState(initial?.amount != null ? String(initial.amount) : '');
   const [currency, setCurrency] = useState(initial?.currency || 'RUB');
   const [category, setCategory] = useState(initial?.category || '');
+  const [subcategory, setSubcategory] = useState(initial?.subcategory || '');
   const [date, setDate] = useState(initial?.occurred_at || todayISO());
   const [note, setNote] = useState(initial?.note || '');
   const [newCat, setNewCat] = useState('');
+  const [newSub, setNewSub] = useState('');
   const [busy, setBusy] = useState(false);
   const { rates, date: ratesDate } = useRates();
 
   const catList = categories[kind] || [];
+  const subList = (subcategories?.[kind]?.[category]) || [];
 
   // Конвертер: рубль базовый → для не-RUB считаем эквивалент в ₽
   const amountNum = Math.abs(parseFloat((amount || '').replace(',', '.')));
@@ -220,7 +244,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
   function onAmountChange(v) {
     const clean = sanitizeAmount(v);
     setAmount(clean);
-    if (clean.startsWith('-') && kind !== 'expense') { setKind('expense'); setCategory(''); }
+    if (clean.startsWith('-') && kind !== 'expense') { setKind('expense'); setCategory(''); setSubcategory(''); }
   }
 
   async function submit(e) {
@@ -232,7 +256,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
     setBusy(true);
     try {
       // В БД сумма всегда положительная — знак выражается через kind
-      await onSave({ kind, amount: Math.abs(n), currency, category, occurred_at: date, note: note.trim() });
+      await onSave({ kind, amount: Math.abs(n), currency, category, subcategory: subcategory || '', occurred_at: date, note: note.trim() });
     } finally {
       setBusy(false);
     }
@@ -247,7 +271,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
         {[['expense', 'Расход', TrendingDown, t.ACCENT], ['income', 'Доход', TrendingUp, t.POSITIVE]].map(([k, lbl, Icon, col]) => {
           const on = kind === k;
           return (
-            <button key={k} type="button" onClick={() => { setKind(k); setCategory(''); }} style={{
+            <button key={k} type="button" onClick={() => { setKind(k); setCategory(''); setSubcategory(''); }} style={{
               flex: 1, padding: '11px', border: 'none', clipPath: CUT(8), cursor: 'pointer',
               fontWeight: 800, fontFamily: FONT_DISPLAY, letterSpacing: '.06em', textTransform: 'uppercase', fontSize: 12,
               background: on ? (k === 'income' ? t.POSITIVE : t.ACCENT_GRAD) : t.BG_INPUT,
@@ -295,7 +319,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
       )}
 
       <Field label="Категория">
-        <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle(t)}>
+        <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(''); }} style={inputStyle(t)}>
           <option value="">— выбери —</option>
           {catList.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
@@ -304,10 +328,30 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="Новая категория"
           style={{ ...inputStyle(t), flex: 1 }} />
-        <Btn variant="ghost" onClick={() => { if (newCat.trim()) { onAddCategory(kind, newCat.trim()); setCategory(newCat.trim()); setNewCat(''); } }}>
+        <Btn variant="ghost" onClick={() => { if (newCat.trim()) { onAddCategory(kind, newCat.trim()); setCategory(newCat.trim()); setSubcategory(''); setNewCat(''); } }}>
           <Plus size={16} />
         </Btn>
       </div>
+
+      {/* Подкатегория — опциональна, доступна после выбора категории */}
+      {category && (
+        <>
+          <Field label="Подкатегория · необязательно">
+            <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={inputStyle(t)}>
+              <option value="">— без подкатегории —</option>
+              {subList.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </Field>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <input value={newSub} onChange={(e) => setNewSub(e.target.value)} placeholder="Новая подкатегория"
+              style={{ ...inputStyle(t), flex: 1 }} />
+            <Btn variant="ghost" onClick={() => { if (newSub.trim()) { onAddSubcategory(kind, category, newSub.trim()); setSubcategory(newSub.trim()); setNewSub(''); } }}>
+              <Plus size={16} />
+            </Btn>
+          </div>
+        </>
+      )}
 
       <Field label="Дата">
         <input
@@ -352,9 +396,210 @@ function HudLabel({ children, right }) {
 }
 
 /* ============================================================
+   Бегущая строка курсов ЦБ + суточное изменение
+   ============================================================ */
+function RatesTicker() {
+  const t = useTheme();
+  const { rates, changes } = useRates();
+  if (!rates) return null;
+  const items = CURRENCIES.filter((c) => c.code !== 'RUB' && rates[c.code])
+    .map((c) => ({ code: c.code, rate: rates[c.code], ch: changes?.[c.code] }));
+  if (!items.length) return null;
+
+  const Item = ({ it }) => {
+    const up = it.ch != null && it.ch >= 0;
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 26, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap' }}>
+        <span style={{ fontWeight: 700, color: t.TEXT, letterSpacing: '.04em' }}>{it.code}</span>
+        <span style={{ color: t.TEXT_DIM }}>{fmtRub(it.rate)} ₽</span>
+        {it.ch != null && (
+          <span style={{ fontWeight: 700, color: up ? t.POSITIVE : t.ACCENT }}>
+            {up ? '▲' : '▼'} {Math.abs(it.ch).toFixed(2)}%
+          </span>
+        )}
+      </span>
+    );
+  };
+  const row = (dupKey) => items.map((it) => <Item key={dupKey + it.code} it={it} />);
+
+  return (
+    <div style={{ position: 'relative', overflow: 'hidden', background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 0', marginBottom: 16 }}>
+      <div className="ticker-track">
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 26, marginLeft: 12, fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 9, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT }}>Курсы ЦБ · 24ч</span>
+        {row('a')}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 26, marginLeft: 12, fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 9, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT }}>Курсы ЦБ · 24ч</span>
+        {row('b')}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Строка операции
+   ============================================================ */
+function TxRow({ x, onEdit, onDelete }) {
+  const t = useTheme();
+  const inc = x.kind === 'income';
+  return (
+    <div style={{
+      background: t.BG_RAISED, clipPath: CUT_TL(14), padding: '10px 12px 10px 6px',
+      display: 'flex', alignItems: 'center', gap: 12,
+    }}>
+      <div style={{ width: 5, alignSelf: 'stretch', marginLeft: 8, transform: 'skewX(-18deg)', background: inc ? t.POSITIVE : t.ACCENT }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13, color: t.TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {x.category}{x.subcategory ? <span style={{ color: t.TEXT_FAINT, fontWeight: 500 }}> · {x.subcategory}</span> : null}
+        </div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '.06em', color: t.TEXT_FAINT, marginTop: 2 }}>
+          {fmtDate(x.occurred_at)}{x.note ? ` · ${x.note.toUpperCase()}` : ''}
+        </div>
+      </div>
+      <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13, fontVariantNumeric: 'tabular-nums', color: inc ? t.POSITIVE : t.TEXT }}>
+        {inc ? '+' : '−'}{num(x.amount, x.currency)}
+      </div>
+      <div style={{ display: 'flex', gap: 2 }}>
+        <button onClick={() => onEdit(x)} style={iconBtn(t)}><Pencil size={14} /></button>
+        <button onClick={() => { if (confirm('Удалить операцию?')) onDelete(x.id); }} style={iconBtn(t)}><Trash2 size={14} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Иерархический журнал: Месяц → Неделя → День
+   Текущий месяц развёрнут по неделям (текущая неделя раскрыта),
+   прошлые месяцы — сворачиваемые группы.
+   ============================================================ */
+const sumByCur = (list) => {
+  const m = {};
+  for (const x of list) { (m[x.currency] ||= { income: 0, expense: 0 })[x.kind] += x.amount; }
+  return Object.entries(m);
+};
+function GroupSums({ list }) {
+  const t = useTheme();
+  return (
+    <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-end' }}>
+      {sumByCur(list).map(([cur, v]) => (
+        <span key={cur} style={{ fontFamily: FONT_MONO, fontSize: 10, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+          {v.income ? <span style={{ color: t.POSITIVE, fontWeight: 700 }}>+{num(v.income, cur)}</span> : null}
+          {v.expense ? <span style={{ color: t.ACCENT, fontWeight: 700 }}>{v.income ? ' ' : ''}−{num(v.expense, cur)}</span> : null}
+          <span style={{ color: t.TEXT_FAINT }}> {cur}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+function buildTree(list) {
+  const months = new Map();
+  for (const x of list) {
+    const mk = monthKey(x.occurred_at), wk = mondayOf(x.occurred_at), dk = x.occurred_at;
+    let M = months.get(mk); if (!M) { M = { txs: [], weeks: new Map() }; months.set(mk, M); } M.txs.push(x);
+    let W = M.weeks.get(wk); if (!W) { W = { txs: [], days: new Map() }; M.weeks.set(wk, W); } W.txs.push(x);
+    let D = W.days.get(dk); if (!D) { D = { txs: [] }; W.days.set(dk, D); } D.txs.push(x);
+  }
+  return months;
+}
+function Journal({ txs, month, onEdit, onDelete }) {
+  const t = useTheme();
+  const today = todayISO();
+  const curMonth = monthKey(today);
+  const curWeek = mondayOf(today);
+  const [openMonths, setOpenMonths] = useState(() => new Set());
+  const [openWeeks, setOpenWeeks] = useState(() => new Set([curWeek]));
+  const [closedDays, setClosedDays] = useState(() => new Set());
+
+  // Навигатор месяца раскрывает соответствующую группу в журнале
+  useEffect(() => {
+    if (month && month !== curMonth) setOpenMonths((s) => (s.has(month) ? s : new Set(s).add(month)));
+  }, [month, curMonth]);
+
+  const toggle = (setter) => (key) => setter((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const toggleMonth = toggle(setOpenMonths);
+  const toggleWeek = toggle(setOpenWeeks);
+  const toggleDay = toggle(setClosedDays);
+
+  const sorted = useMemo(() => [...txs].sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1)), [txs]);
+  const months = useMemo(() => buildTree(sorted), [sorted]);
+
+  if (sorted.length === 0) return null;
+
+  const chev = (open) => <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.TEXT_META, width: 12, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>;
+
+  const renderWeeks = (M) => [...M.weeks.entries()].map(([wk, W]) => {
+    const weekOpen = openWeeks.has(wk);
+    const isCurWeek = wk === curWeek;
+    return (
+      <div key={wk} style={{ marginBottom: 6 }}>
+        <button onClick={() => toggleWeek(wk)} style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: t.BG_HERO, clipPath: CUT(8),
+          border: 'none', cursor: 'pointer', padding: '8px 11px', textAlign: 'left',
+          borderLeft: isCurWeek ? `2px solid ${t.ACCENT}` : `2px solid ${t.HAIR}`,
+        }}>
+          {chev(weekOpen)}
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.TEXT_DIM, whiteSpace: 'nowrap' }}>{fmtWeekRange(wk)}</span>
+          {isCurWeek && <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 8, letterSpacing: '.14em', textTransform: 'uppercase', color: t.ACCENT }}>Тек.</span>}
+          <span style={{ flex: 1 }} />
+          <GroupSums list={W.txs} />
+        </button>
+        {weekOpen && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 5, paddingLeft: 8 }}>
+            {[...W.days.entries()].map(([dk, D]) => {
+              const dayOpen = !closedDays.has(dk);
+              return (
+                <div key={dk}>
+                  <button onClick={() => toggleDay(dk)} style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: 'transparent',
+                    border: 'none', cursor: 'pointer', padding: '3px 2px', textAlign: 'left',
+                  }}>
+                    {chev(dayOpen)}
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 9.5, letterSpacing: '.04em', textTransform: 'uppercase', color: t.TEXT_FAINT }}>{fmtDayFull(dk)}</span>
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: t.TEXT_FAINT }}>{String(D.txs.length).padStart(2, '0')}</span>
+                  </button>
+                  {dayOpen && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                      {D.txs.map((x) => <TxRow key={x.id} x={x} onEdit={onEdit} onDelete={onDelete} />)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {[...months.entries()].map(([mk, M]) => {
+        const isCur = mk === curMonth;
+        const monthOpen = isCur || openMonths.has(mk);
+        return (
+          <div key={mk}>
+            {!isCur && (
+              <button onClick={() => toggleMonth(mk)} style={{
+                width: '100%', display: 'flex', alignItems: 'center', gap: 9, background: t.BG_RAISED, clipPath: CUT(9),
+                border: 'none', cursor: 'pointer', padding: '11px 12px', textAlign: 'left', marginBottom: monthOpen ? 8 : 0,
+              }}>
+                {chev(monthOpen)}
+                <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 12, letterSpacing: '.1em', textTransform: 'uppercase', color: t.TEXT }}>{fmtMonthShort(mk)}</span>
+                <span style={{ flex: 1 }} />
+                <GroupSums list={M.txs} />
+              </button>
+            )}
+            {monthOpen && <div style={{ paddingLeft: isCur ? 0 : 6 }}>{renderWeeks(M)}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ============================================================
    Вкладка «Операции»
    ============================================================ */
-function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, onDelete, onAddCategory }) {
+function OperationsTab({ txs, month, setMonth, categories, subcategories, onCreate, onUpdate, onDelete, onAddCategory, onAddSubcategory }) {
   const t = useTheme();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -412,45 +657,22 @@ function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, o
       )}
 
       {adding && (
-        <TxForm categories={categories} onCancel={() => setAdding(false)} onAddCategory={onAddCategory}
+        <TxForm categories={categories} subcategories={subcategories} onCancel={() => setAdding(false)}
+          onAddCategory={onAddCategory} onAddSubcategory={onAddSubcategory}
           onSave={async (data) => { await onCreate(data); setAdding(false); }} />
       )}
       {editing && (
-        <TxForm initial={editing} categories={categories} onCancel={() => setEditing(null)} onAddCategory={onAddCategory}
+        <TxForm initial={editing} categories={categories} subcategories={subcategories} onCancel={() => setEditing(null)}
+          onAddCategory={onAddCategory} onAddSubcategory={onAddSubcategory}
           onSave={async (data) => { await onUpdate(editing.id, data); setEditing(null); }} />
       )}
 
-      {/* Журнал */}
-      {monthTxs.length > 0 && <HudLabel right={String(monthTxs.length).padStart(2, '0')}>Журнал</HudLabel>}
+      {/* Бегущая строка курсов ЦБ (между «Новой операцией» и «Журналом») */}
+      <RatesTicker />
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-        {monthTxs.map((x) => {
-          const inc = x.kind === 'income';
-          return (
-            <div key={x.id} style={{
-              background: t.BG_RAISED, clipPath: CUT_TL(14), padding: '10px 12px 10px 6px',
-              display: 'flex', alignItems: 'center', gap: 12,
-            }}>
-              <div style={{ width: 5, alignSelf: 'stretch', marginLeft: 8, transform: 'skewX(-18deg)', background: inc ? t.POSITIVE : t.ACCENT }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13, color: t.TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {x.category}
-                </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '.06em', color: t.TEXT_FAINT, marginTop: 2 }}>
-                  {fmtDate(x.occurred_at)}{x.note ? ` · ${x.note.toUpperCase()}` : ''}
-                </div>
-              </div>
-              <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13, fontVariantNumeric: 'tabular-nums', color: inc ? t.POSITIVE : t.TEXT }}>
-                {inc ? '+' : '−'}{num(x.amount, x.currency)}
-              </div>
-              <div style={{ display: 'flex', gap: 2 }}>
-                <button onClick={() => { setAdding(false); setEditing(x); }} style={iconBtn(t)}><Pencil size={14} /></button>
-                <button onClick={() => { if (confirm('Удалить операцию?')) onDelete(x.id); }} style={iconBtn(t)}><Trash2 size={14} /></button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {/* Журнал — все операции, сгруппированы по месяцам/неделям/дням */}
+      {txs.length > 0 && <HudLabel right={String(txs.length).padStart(2, '0')}>Журнал</HudLabel>}
+      <Journal txs={txs} month={month} onEdit={(x) => { setAdding(false); setEditing(x); }} onDelete={onDelete} />
     </div>
   );
 }
@@ -491,6 +713,7 @@ function iconBtn(t) {
 function StatsTab({ txs, month, setMonth }) {
   const t = useTheme();
   const [cur, setCur] = useState(null);
+  const { rates } = useRates();
 
   const monthTxs = txs.filter((x) => monthKey(x.occurred_at) === month);
   const currencies = [...new Set(monthTxs.map((x) => x.currency))];
@@ -546,12 +769,19 @@ function StatsTab({ txs, month, setMonth }) {
         </div>
       )}
 
-      {/* Карточки */}
-      <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
-        <StatCard label="Доход" value={num(income, activeCur)} color={t.POSITIVE} />
-        <StatCard label="Расход" value={num(expense, activeCur)} color={t.ACCENT} />
-        <StatCard label="Баланс" value={`${income - expense >= 0 ? '+' : '−'}${num(Math.abs(income - expense), activeCur)}`} color={t.TEXT} />
-      </div>
+      {/* Карточки. Под рублёвыми суммами — эквивалент в долларах по курсу ЦБ */}
+      {(() => {
+        const showUsd = activeCur === 'RUB' && rates && rates.USD;
+        const usd = (rub) => { const v = convert(Math.abs(rub), 'RUB', 'USD', rates); return v != null ? `≈ $${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(v)}` : null; };
+        const bal = income - expense;
+        return (
+          <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
+            <StatCard label="Доход" value={num(income, activeCur)} color={t.POSITIVE} sub={showUsd ? usd(income) : null} />
+            <StatCard label="Расход" value={num(expense, activeCur)} color={t.ACCENT} sub={showUsd ? usd(expense) : null} />
+            <StatCard label="Баланс" value={`${bal >= 0 ? '+' : '−'}${num(Math.abs(bal), activeCur)}`} color={t.TEXT} sub={showUsd ? usd(bal) : null} />
+          </div>
+        );
+      })()}
 
       {/* Пончик расходов */}
       {byCategory.length > 0 && (
@@ -565,7 +795,10 @@ function StatsTab({ txs, month, setMonth }) {
                   {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} />)}
                 </Pie>
                 <Tooltip formatter={(v) => money(v, activeCur)}
-                  contentStyle={{ background: t.BG_INPUT, border: `1px solid ${t.BORDER}`, borderRadius: 0, clipPath: CUT(6), color: t.TEXT, fontFamily: FONT_MONO, fontSize: 12 }} />
+                  cursor={{ fill: 'rgba(224,138,60,.08)' }}
+                  contentStyle={{ background: '#0C0C0C', border: `1.5px solid ${t.ACCENT}`, borderRadius: 2, color: t.TEXT, fontFamily: FONT_MONO, fontSize: 12, boxShadow: '0 10px 28px -8px rgba(224,138,60,.6)' }}
+                  labelStyle={{ color: t.GOLD, fontWeight: 700, fontFamily: FONT_DISPLAY, letterSpacing: '.06em', textTransform: 'uppercase' }}
+                  itemStyle={{ color: t.TEXT, fontWeight: 700 }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -599,12 +832,13 @@ function MonthNav({ month, setMonth }) {
   );
 }
 
-function StatCard({ label, value, color }) {
+function StatCard({ label, value, color, sub }) {
   const t = useTheme();
   return (
     <div style={{ flex: 1, background: t.BG_RAISED, padding: '11px 10px', borderLeft: `2px solid ${color}` }}>
       <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 8, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT, marginBottom: 7 }}>{label}</div>
       <div style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+      {sub && <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 500, color: t.TEXT_FAINT, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>{sub}</div>}
     </div>
   );
 }
@@ -617,6 +851,7 @@ function Main({ displayName }) {
   const [tab, setTab] = useState('ops');
   const [txs, setTxs] = useState([]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [subcategories, setSubcategories] = useState(DEFAULT_SUBCATEGORIES);
   const [month, setMonth] = useState(monthKey(todayISO()));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -650,6 +885,7 @@ function Main({ displayName }) {
       try {
         const dec = await decryptObject(settings);
         if (dec?.categories) setCategories(dec.categories);
+        if (dec?.subcategories) setSubcategories(dec.subcategories);
       } catch { /* ключ не подошёл — оставляем дефолт */ }
     }
     // транзакции
@@ -670,40 +906,48 @@ function Main({ displayName }) {
     setTxs(decrypted);
   }
 
-  async function persistCategories(next) {
-    setCategories(next);
+  async function persistSettings(nextCats, nextSubs) {
+    setCategories(nextCats);
+    setSubcategories(nextSubs);
     const userId = await uid();
-    const payload = await encryptObject({ categories: next });
+    const payload = await encryptObject({ categories: nextCats, subcategories: nextSubs });
     await supabase.from('app_settings').upsert({ user_id: userId, ...payload });
   }
 
   async function addCategory(kind, name) {
     if (categories[kind]?.includes(name)) return;
-    persistCategories({ ...categories, [kind]: [...(categories[kind] || []), name] });
+    persistSettings({ ...categories, [kind]: [...(categories[kind] || []), name] }, subcategories);
+  }
+
+  async function addSubcategory(kind, category, name) {
+    const cur = subcategories?.[kind]?.[category] || [];
+    if (cur.includes(name)) return;
+    const nextSubs = { ...subcategories, [kind]: { ...(subcategories[kind] || {}), [category]: [...cur, name] } };
+    persistSettings(categories, nextSubs);
   }
 
   async function createTx(data) {
     const userId = await uid();
-    const { amount, category, note, kind, currency, occurred_at } = data;
-    const payload = await encryptObject({ amount, category, note });
+    const { amount, category, subcategory = '', note, kind, currency, occurred_at } = data;
+    const payload = await encryptObject({ amount, category, subcategory, note });
     const { data: row, error } = await supabase
       .from('transactions')
       .insert({ user_id: userId, kind, currency, occurred_at, ...payload })
       .select('id')
       .single();
     if (error) return alert('Ошибка сохранения: ' + error.message);
-    setTxs((prev) => [{ id: row.id, kind, currency, occurred_at, amount, category, note }, ...prev]);
+    setTxs((prev) => [{ id: row.id, kind, currency, occurred_at, amount, category, subcategory, note }, ...prev]);
   }
 
   async function updateTx(id, data) {
-    const { amount, category, note, kind, currency, occurred_at } = data;
-    const payload = await encryptObject({ amount, category, note });
+    const { amount, category, subcategory = '', note, kind, currency, occurred_at } = data;
+    const payload = await encryptObject({ amount, category, subcategory, note });
     const { error } = await supabase
       .from('transactions')
       .update({ kind, currency, occurred_at, ...payload })
       .eq('id', id);
     if (error) return alert('Ошибка обновления: ' + error.message);
-    setTxs((prev) => prev.map((x) => (x.id === id ? { id, kind, currency, occurred_at, amount, category, note } : x)));
+    setTxs((prev) => prev.map((x) => (x.id === id ? { id, kind, currency, occurred_at, amount, category, subcategory, note } : x)));
   }
 
   async function deleteTx(id) {
@@ -749,8 +993,8 @@ function Main({ displayName }) {
       )}
 
       {tab === 'ops' && (
-        <OperationsTab txs={txs} month={month} setMonth={setMonth} categories={categories}
-          onCreate={createTx} onUpdate={updateTx} onDelete={deleteTx} onAddCategory={addCategory} />
+        <OperationsTab txs={txs} month={month} setMonth={setMonth} categories={categories} subcategories={subcategories}
+          onCreate={createTx} onUpdate={updateTx} onDelete={deleteTx} onAddCategory={addCategory} onAddSubcategory={addSubcategory} />
       )}
       {tab === 'stats' && <StatsTab txs={txs} month={month} setMonth={setMonth} />}
 
@@ -832,6 +1076,8 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@600;700;800;900&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
         .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+        .ticker-track{display:inline-flex;align-items:center;white-space:nowrap;will-change:transform;animation:ticker 26s linear infinite}
+        @keyframes ticker{from{transform:translateX(0)}to{transform:translateX(-50%)}}
         *{-webkit-tap-highlight-color:transparent} input,select,button{font-family:inherit}
         body{background:${theme.BG}}
       `}</style>
