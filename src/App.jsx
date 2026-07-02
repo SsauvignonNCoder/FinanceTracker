@@ -208,17 +208,26 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
   const rate = rates && currency !== 'RUB' ? rates[currency] : null;
   const rubEquiv = rate && amountNum ? amountNum * rate : null;
 
-  // Ввод суммы: отрицательное значение автоматически помечает операцию как расход
+  // Ввод суммы: один разделитель «,», максимум 2 знака после запятой,
+  // допускается ведущий минус (авто-расход)
+  function sanitizeAmount(v) {
+    const neg = /^-/.test(v.trim());
+    let s = v.replace(/[^\d.,]/g, '').replace(/\./g, ','); // точку → запятую, лишнее убрать
+    const parts = s.split(',');
+    s = parts[0] + (parts.length > 1 ? ',' + parts.slice(1).join('').slice(0, 2) : '');
+    return (neg ? '-' : '') + s;
+  }
   function onAmountChange(v) {
-    setAmount(v);
-    const parsed = parseFloat(v.replace(',', '.'));
-    if (parsed < 0 && kind !== 'expense') { setKind('expense'); setCategory(''); }
+    const clean = sanitizeAmount(v);
+    setAmount(clean);
+    if (clean.startsWith('-') && kind !== 'expense') { setKind('expense'); setCategory(''); }
   }
 
   async function submit(e) {
     e.preventDefault();
     const n = parseFloat(amount.replace(',', '.'));
     if (!n || isNaN(n)) return alert('Введи сумму');
+    if (Math.abs(n) < 0.01) return alert('Сумма не может быть меньше 0,01');
     if (!category) return alert('Выбери категорию');
     setBusy(true);
     try {
@@ -707,7 +716,11 @@ function Main({ displayName }) {
   if (error) return <CenterScreen><X size={30} color={t.ACCENT} /><span style={{ fontFamily: FONT_BODY }}>{error}</span></CenterScreen>;
 
   return (
-    <div style={{ maxWidth: 560, margin: '0 auto', padding: '14px 14px 96px', color: t.TEXT }}>
+    <div style={{
+      maxWidth: 560, margin: '0 auto', color: t.TEXT,
+      paddingTop: 'calc(env(safe-area-inset-top, 0px) + 56px)',
+      paddingLeft: 14, paddingRight: 14, paddingBottom: 96,
+    }}>
       <header style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 16 }}>
         <div style={{ width: 32, height: 32, background: t.ACCENT_GRAD, clipPath: CUT(8), display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
           <Wallet size={17} color={t.ON_ACCENT} />
