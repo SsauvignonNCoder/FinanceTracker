@@ -1,40 +1,54 @@
 import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import {
   Wallet, Plus, TrendingUp, TrendingDown, Trash2, Pencil, X, Check,
-  BarChart3, ListOrdered, Settings, ChevronLeft, ChevronRight, Loader2, ShieldCheck,
+  BarChart3, ListOrdered, ChevronLeft, ChevronRight, Loader2, ShieldCheck,
 } from 'lucide-react';
 import { supabase, supabaseConfigured } from './supabaseClient.js';
 import { getKey, encryptObject, decryptObject } from './lib/crypto.js';
 
 /* ============================================================
-   Тема — тёплая тёмная/светлая палитра, акцент гранатовый (единый
-   с трекерами тренировок и питания — «семья» приложений).
+   NEO-VECTORHEART · VELOCITY — визуальный редизайн Finance Tracker.
+   Чёрная база, янтарь-медь (бренд-акцент) + кислотный лайм (доход),
+   диагональная геометрия, скошенные грани, HUD-разметка.
+   Логика (auth / Supabase / шифрование / CRUD) не изменена.
    ============================================================ */
-const ACCENT = '#A8334C';
-const POSITIVE = '#5C8A4E';
-const THEMES = {
-  dark: {
-    BG: '#1A1715', BG_RAISED: '#242019', BG_INPUT: '#2D2620', BORDER: '#3D3127',
-    ACCENT, ACCENT_SOFT: '#C4566E', POSITIVE, GOLD: '#CC9F3D',
-    TEXT: '#EDE6DB', TEXT_DIM: '#A89C8C', TEXT_FAINT: '#766A5C',
-  },
-  light: {
-    BG: '#FBF6EE', BG_RAISED: '#FFFFFF', BG_INPUT: '#F2E9DA', BORDER: '#E0D2BA',
-    ACCENT, ACCENT_SOFT: '#8C2A3F', POSITIVE: '#4E7342', GOLD: '#9C7A1F',
-    TEXT: '#2A2218', TEXT_DIM: '#5C5040', TEXT_FAINT: '#80735E',
-  },
-};
-const SERIES = ['#A8334C', '#5B8FB0', '#C9A227', '#5C8A4E', '#9B6FB5', '#C97B3F', '#4E8A83', '#B0556F'];
 
-const ThemeContext = createContext(THEMES.dark);
+// Шрифты-герои экосистемы + дисплейный Exo 2
+const FONT_DISPLAY = "'Exo 2', system-ui, sans-serif";   // шапка, баланс, лейблы, кнопки
+const FONT_BODY = "'Space Grotesk', system-ui, sans-serif"; // тело, названия категорий
+const FONT_MONO = "'JetBrains Mono', ui-monospace, monospace"; // суммы, даты, коды
+
+const ACCENT = '#E08A3C';                         // янтарь (плоский)
+const ACCENT_GRAD = 'linear-gradient(135deg,#EDA053,#C8643C)';
+const POSITIVE = '#C6F135';                        // кислотный лайм — доход
+const ON_ACCENT = '#1A120A';                       // тёмный текст на акценте
+
+const THEME = {
+  BG: '#080808', BG_RAISED: '#111111', BG_HERO: '#101010', BG_INPUT: '#161616',
+  BORDER: '#2A2A2A', HAIR: '#1E1E1E',
+  ACCENT, ACCENT_GRAD, ACCENT_SOFT: '#EDA053', POSITIVE, ON_ACCENT, GOLD: '#EDA053',
+  TEXT: '#F2F2F2', TEXT_DIM: '#B8B0A4', TEXT_FAINT: '#565656', TEXT_META: '#8A8A8A',
+};
+// Обе схемы Telegram → одна тёмная тема (решение редизайна: dark-only)
+const THEMES = { dark: THEME, light: THEME };
+
+// Пончик расходов: янтарь → медь → серые, лайм-акцент
+const SERIES = ['#E08A3C', '#C8643C', '#8A8A8A', '#C6F135', '#4E4E4E', '#EDA053', '#B8B0A4', '#6E6E6E'];
+
+// Скошенные грани (сигнатура)
+const CUT = (n) => `polygon(0 0,calc(100% - ${n}px) 0,100% ${n}px,100% 100%,${n}px 100%,0 calc(100% - ${n}px))`;
+const CUT_BR = (v, h) => `polygon(0 0,100% 0,100% calc(100% - ${v}px),calc(100% - ${h}px) 100%,0 100%)`;
+const CUT_TL = (n) => `polygon(${n}px 0,100% 0,100% 100%,0 100%)`;
+const HATCH = (color, gap) => `repeating-linear-gradient(-60deg,${color} 0 1px,transparent 1px ${gap}px)`;
+
+const ThemeContext = createContext(THEME);
 const useTheme = () => useContext(ThemeContext);
 
 /* ============================================================
-   Валюты (ISO-коды, чтобы Intl корректно форматировал)
+   Валюты
    ============================================================ */
 const CURRENCIES = [
   { code: 'RUB', label: '₽ Рубль' },
@@ -56,6 +70,7 @@ const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // YYYY-MM
 const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const fmtMonth = (mk) => { const [y, m] = mk.split('-'); return `${MONTHS_RU[+m - 1]} ${y}`; };
+const fmtMonthShort = (mk) => { const [y, m] = mk.split('-'); return `${MONTHS_RU[+m - 1].toUpperCase()} ${y}`; };
 const shiftMonth = (mk, delta) => {
   const [y, m] = mk.split('-').map(Number);
   const d = new Date(y, m - 1 + delta, 1);
@@ -68,8 +83,16 @@ function money(amount, currency) {
     return `${amount} ${currency}`;
   }
 }
+function num(amount, currency) {
+  // Число без символа валюты — для крупных дисплейных сумм
+  try {
+    return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(amount);
+  } catch {
+    return `${amount}`;
+  }
+}
 const fmtDate = (iso) => {
-  try { return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }); }
+  try { return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).toUpperCase(); }
   catch { return iso; }
 };
 
@@ -80,29 +103,30 @@ function Field({ label, children }) {
   const t = useTheme();
   return (
     <label style={{ display: 'block', marginBottom: 12 }}>
-      <span style={{ display: 'block', fontSize: 12, color: t.TEXT_DIM, marginBottom: 5 }}>{label}</span>
+      <span style={{ display: 'block', fontFamily: FONT_DISPLAY, fontSize: 10, fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT, marginBottom: 6 }}>{label}</span>
       {children}
     </label>
   );
 }
 function inputStyle(t) {
   return {
-    width: '100%', boxSizing: 'border-box', padding: '11px 12px', fontSize: 16,
+    width: '100%', boxSizing: 'border-box', padding: '11px 12px', fontSize: 16, fontFamily: FONT_BODY,
     background: t.BG_INPUT, color: t.TEXT, border: `1px solid ${t.BORDER}`,
-    borderRadius: 10, outline: 'none',
+    borderRadius: 0, clipPath: CUT(8), outline: 'none',
   };
 }
 function Btn({ children, onClick, variant = 'primary', style, disabled, type = 'button' }) {
   const t = useTheme();
   const base = {
-    border: 'none', borderRadius: 10, padding: '12px 16px', fontSize: 15, fontWeight: 600,
+    border: 'none', borderRadius: 0, padding: '13px 16px', fontSize: 13, fontWeight: 800,
+    fontFamily: FONT_DISPLAY, letterSpacing: '.08em', textTransform: 'uppercase',
     cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
   };
   const variants = {
-    primary: { background: t.ACCENT, color: '#fff' },
-    ghost: { background: t.BG_INPUT, color: t.TEXT },
-    danger: { background: 'transparent', color: t.ACCENT_SOFT, border: `1px solid ${t.BORDER}` },
+    primary: { background: t.ACCENT_GRAD, color: t.ON_ACCENT, clipPath: CUT_BR(11, 18), boxShadow: '0 12px 26px -12px rgba(224,138,60,.85)' },
+    ghost: { background: t.BG_INPUT, color: t.TEXT, clipPath: CUT(9) },
+    danger: { background: 'transparent', color: t.ACCENT, border: `1px solid ${t.BORDER}`, clipPath: CUT(9) },
   };
   return (
     <button type={type} onClick={onClick} disabled={disabled} style={{ ...base, ...variants[variant], ...style }}>
@@ -144,12 +168,12 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
 
   async function submit(e) {
     e.preventDefault();
-    const num = parseFloat(amount.replace(',', '.'));
-    if (!num || num <= 0) return alert('Введи сумму больше нуля');
+    const n = parseFloat(amount.replace(',', '.'));
+    if (!n || n <= 0) return alert('Введи сумму больше нуля');
     if (!category) return alert('Выбери категорию');
     setBusy(true);
     try {
-      await onSave({ kind, amount: num, currency, category, occurred_at: date, note: note.trim() });
+      await onSave({ kind, amount: n, currency, category, occurred_at: date, note: note.trim() });
     } finally {
       setBusy(false);
     }
@@ -157,33 +181,36 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
 
   return (
     <form onSubmit={submit} style={{
-      background: t.BG_RAISED, border: `1px solid ${t.BORDER}`, borderRadius: 14, padding: 16, marginBottom: 16,
+      background: t.BG_RAISED, clipPath: CUT(14), padding: 16, marginBottom: 16,
     }}>
       {/* Тип */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-        {[['expense', 'Расход', TrendingDown], ['income', 'Доход', TrendingUp]].map(([k, lbl, Icon]) => (
-          <button key={k} type="button" onClick={() => { setKind(k); setCategory(''); }} style={{
-            flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer', fontWeight: 600,
-            border: `1px solid ${kind === k ? (k === 'income' ? t.POSITIVE : t.ACCENT) : t.BORDER}`,
-            background: kind === k ? (k === 'income' ? t.POSITIVE : t.ACCENT) : 'transparent',
-            color: kind === k ? '#fff' : t.TEXT_DIM,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-          }}>
-            <Icon size={16} /> {lbl}
-          </button>
-        ))}
+        {[['expense', 'Расход', TrendingDown, t.ACCENT], ['income', 'Доход', TrendingUp, t.POSITIVE]].map(([k, lbl, Icon, col]) => {
+          const on = kind === k;
+          return (
+            <button key={k} type="button" onClick={() => { setKind(k); setCategory(''); }} style={{
+              flex: 1, padding: '11px', border: 'none', clipPath: CUT(8), cursor: 'pointer',
+              fontWeight: 800, fontFamily: FONT_DISPLAY, letterSpacing: '.06em', textTransform: 'uppercase', fontSize: 12,
+              background: on ? (k === 'income' ? t.POSITIVE : t.ACCENT_GRAD) : t.BG_INPUT,
+              color: on ? t.ON_ACCENT : t.TEXT_DIM,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            }}>
+              <Icon size={16} /> {lbl}
+            </button>
+          );
+        })}
       </div>
 
       <div style={{ display: 'flex', gap: 10 }}>
         <div style={{ flex: 2 }}>
           <Field label="Сумма">
             <input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)}
-              placeholder="0" style={inputStyle(t)} autoFocus />
+              placeholder="0" style={{ ...inputStyle(t), fontFamily: FONT_MONO, fontWeight: 600 }} autoFocus />
           </Field>
         </div>
         <div style={{ flex: 1 }}>
           <Field label="Валюта">
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)} style={inputStyle(t)}>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)} style={{ ...inputStyle(t), fontFamily: FONT_MONO }}>
               {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
             </select>
           </Field>
@@ -206,7 +233,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
       </div>
 
       <Field label="Дата">
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle(t)} />
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle(t), fontFamily: FONT_MONO }} />
       </Field>
 
       <Field label="Заметка (необязательно)">
@@ -220,6 +247,20 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
         </Btn>
       </div>
     </form>
+  );
+}
+
+/* ============================================================
+   Секция-лейбл с HUD-разметкой
+   ============================================================ */
+function HudLabel({ children, right }) {
+  const t = useTheme();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 11 }}>
+      <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 9.5, letterSpacing: '.22em', textTransform: 'uppercase', color: t.TEXT_FAINT }}>{children}</span>
+      <div style={{ flex: 1, height: 7, backgroundImage: HATCH(t.BORDER, 7) }} />
+      {right != null && <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 9.5, color: t.TEXT_FAINT }}>{right}</span>}
+    </div>
   );
 }
 
@@ -244,34 +285,41 @@ function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, o
     return acc;
   }, [monthTxs]);
 
+  const curEntries = Object.entries(totals);
+  const [primaryCur, ...restCur] = curEntries;
+
   return (
     <div>
-      <MonthSwitcher month={month} setMonth={setMonth} />
+      {/* Hero-баланс основной валюты */}
+      {primaryCur ? (
+        <HeroBalance cur={primaryCur[0]} v={primaryCur[1]} month={month} />
+      ) : (
+        <div style={{ position: 'relative', background: t.BG_HERO, clipPath: CUT_BR(22, 40), padding: '22px 18px', marginBottom: 13, overflow: 'hidden' }}>
+          <div style={{ position: 'absolute', inset: 0, backgroundImage: HATCH('rgba(224,138,60,.05)', 11), pointerEvents: 'none' }} />
+          <div style={{ position: 'relative', fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 9, letterSpacing: '.26em', textTransform: 'uppercase', color: t.TEXT_META, marginBottom: 8 }}>БАЛАНС · {fmtMonthShort(month)}</div>
+          <div style={{ position: 'relative', color: t.TEXT_FAINT, fontFamily: FONT_BODY, fontSize: 14 }}>Нет операций за этот месяц</div>
+        </div>
+      )}
 
-      {/* Сводка */}
-      <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
-        {Object.keys(totals).length === 0 && (
-          <div style={{ color: t.TEXT_FAINT, fontSize: 14, textAlign: 'center', padding: 8 }}>
-            Нет операций за этот месяц
-          </div>
-        )}
-        {Object.entries(totals).map(([cur, v]) => (
-          <div key={cur} style={{
-            background: t.BG_RAISED, border: `1px solid ${t.BORDER}`, borderRadius: 12,
-            padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          }}>
-            <span style={{ fontWeight: 700, color: t.TEXT_DIM }}>{cur}</span>
-            <div style={{ display: 'flex', gap: 16, fontVariantNumeric: 'tabular-nums' }}>
-              <span style={{ color: t.POSITIVE }}>+{money(v.income, cur)}</span>
-              <span style={{ color: t.ACCENT_SOFT }}>−{money(v.expense, cur)}</span>
-            </div>
+      {/* Месяц + дополнительные валюты */}
+      <div style={{ display: 'flex', gap: 7, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 150, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px' }}>
+          <button onClick={() => setMonth(shiftMonth(month, -1))} style={{ ...iconBtn(t), fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: t.TEXT_META }}>‹</button>
+          <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 11, letterSpacing: '.16em', color: t.TEXT }}>{fmtMonthShort(month)}</span>
+          <button onClick={() => setMonth(shiftMonth(month, 1))} style={{ ...iconBtn(t), fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: t.TEXT_META }}>›</button>
+        </div>
+        {restCur.map(([cur, v]) => (
+          <div key={cur} style={{ display: 'flex', alignItems: 'center', gap: 7, background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px' }}>
+            <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 11, color: t.TEXT }}>{cur}</span>
+            <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 10, color: t.POSITIVE }}>+{num(v.income, cur)}</span>
+            <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 10, color: t.ACCENT }}>−{num(v.expense, cur)}</span>
           </div>
         ))}
       </div>
 
       {!adding && !editing && (
         <Btn onClick={() => setAdding(true)} style={{ width: '100%', marginBottom: 16 }}>
-          <Plus size={18} /> Добавить операцию
+          <Plus size={18} /> Новая операция
         </Btn>
       )}
 
@@ -284,54 +332,69 @@ function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, o
           onSave={async (data) => { await onUpdate(editing.id, data); setEditing(null); }} />
       )}
 
-      {/* Список */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {monthTxs.map((x) => (
-          <div key={x.id} style={{
-            background: t.BG_RAISED, border: `1px solid ${t.BORDER}`, borderRadius: 12, padding: '10px 12px',
-            display: 'flex', alignItems: 'center', gap: 12,
-          }}>
-            <div style={{
-              width: 6, alignSelf: 'stretch', borderRadius: 4,
-              background: x.kind === 'income' ? t.POSITIVE : t.ACCENT,
-            }} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, color: t.TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {x.category}
-              </div>
-              <div style={{ fontSize: 12, color: t.TEXT_FAINT }}>
-                {fmtDate(x.occurred_at)}{x.note ? ` · ${x.note}` : ''}
-              </div>
-            </div>
-            <div style={{
-              fontWeight: 700, fontVariantNumeric: 'tabular-nums',
-              color: x.kind === 'income' ? t.POSITIVE : t.TEXT,
+      {/* Журнал */}
+      {monthTxs.length > 0 && <HudLabel right={String(monthTxs.length).padStart(2, '0')}>Журнал</HudLabel>}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {monthTxs.map((x) => {
+          const inc = x.kind === 'income';
+          return (
+            <div key={x.id} style={{
+              background: t.BG_RAISED, clipPath: CUT_TL(14), padding: '10px 12px 10px 6px',
+              display: 'flex', alignItems: 'center', gap: 12,
             }}>
-              {x.kind === 'income' ? '+' : '−'}{money(x.amount, x.currency)}
+              <div style={{ width: 5, alignSelf: 'stretch', marginLeft: 8, transform: 'skewX(-18deg)', background: inc ? t.POSITIVE : t.ACCENT }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13, color: t.TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {x.category}
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '.06em', color: t.TEXT_FAINT, marginTop: 2 }}>
+                  {fmtDate(x.occurred_at)}{x.note ? ` · ${x.note.toUpperCase()}` : ''}
+                </div>
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13, fontVariantNumeric: 'tabular-nums', color: inc ? t.POSITIVE : t.TEXT }}>
+                {inc ? '+' : '−'}{num(x.amount, x.currency)}
+              </div>
+              <div style={{ display: 'flex', gap: 2 }}>
+                <button onClick={() => { setAdding(false); setEditing(x); }} style={iconBtn(t)}><Pencil size={14} /></button>
+                <button onClick={() => { if (confirm('Удалить операцию?')) onDelete(x.id); }} style={iconBtn(t)}><Trash2 size={14} /></button>
+              </div>
             </div>
-            <div style={{ display: 'flex', gap: 4 }}>
-              <button onClick={() => { setAdding(false); setEditing(x); }} style={iconBtn(t)}><Pencil size={15} /></button>
-              <button onClick={() => { if (confirm('Удалить операцию?')) onDelete(x.id); }} style={iconBtn(t)}><Trash2 size={15} /></button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
-function iconBtn(t) {
-  return { background: 'transparent', border: 'none', color: t.TEXT_FAINT, cursor: 'pointer', padding: 4 };
-}
 
-function MonthSwitcher({ month, setMonth }) {
+function HeroBalance({ cur, v, month }) {
   const t = useTheme();
+  const bal = v.income - v.expense;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-      <button onClick={() => setMonth(shiftMonth(month, -1))} style={iconBtn(t)}><ChevronLeft size={22} /></button>
-      <span style={{ fontWeight: 700, fontSize: 16 }}>{fmtMonth(month)}</span>
-      <button onClick={() => setMonth(shiftMonth(month, 1))} style={iconBtn(t)}><ChevronRight size={22} /></button>
+    <div style={{ position: 'relative', background: t.BG_HERO, clipPath: CUT_BR(22, 40), padding: '16px 18px 20px', marginBottom: 13, overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', inset: 0, backgroundImage: HATCH('rgba(224,138,60,.06)', 11), pointerEvents: 'none' }} />
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 11 }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 9, letterSpacing: '.26em', textTransform: 'uppercase', color: t.TEXT_META }}>Баланс · {fmtMonthShort(month)}</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: FONT_MONO, fontWeight: 700, fontSize: 8, letterSpacing: '.1em', textTransform: 'uppercase', color: t.POSITIVE }}>
+          <ShieldCheck size={11} color={t.POSITIVE} /> Шифр
+        </span>
+      </div>
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'baseline', gap: 7 }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 34, lineHeight: 1, letterSpacing: '-.01em', color: t.TEXT, fontVariantNumeric: 'tabular-nums' }}>
+          {bal >= 0 ? '+' : '−'}{num(Math.abs(bal), cur)}
+        </span>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: t.ACCENT }}>{cur}</span>
+      </div>
+      <div style={{ position: 'relative', display: 'flex', gap: 18, marginTop: 11 }}>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 11, color: t.POSITIVE, fontVariantNumeric: 'tabular-nums' }}>▲ +{num(v.income, cur)}</span>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 11, color: t.ACCENT, fontVariantNumeric: 'tabular-nums' }}>▼ −{num(v.expense, cur)}</span>
+      </div>
     </div>
   );
+}
+
+function iconBtn(t) {
+  return { background: 'transparent', border: 'none', color: t.TEXT_META, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center' };
 }
 
 /* ============================================================
@@ -355,59 +418,76 @@ function StatsTab({ txs, month, setMonth }) {
     return Object.entries(acc).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [curTxs]);
 
+  // Hero-заголовок
+  const Hero = (
+    <div style={{ position: 'relative', background: t.BG_HERO, clipPath: CUT_BR(22, 40), padding: '16px 18px 18px', marginBottom: 13, overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', inset: 0, backgroundImage: HATCH('rgba(198,241,53,.05)', 11), pointerEvents: 'none' }} />
+      <div style={{ position: 'relative', fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 9, letterSpacing: '.26em', textTransform: 'uppercase', color: t.TEXT_META, marginBottom: 6 }}>Статистика · STAT·02</div>
+      <div style={{ position: 'relative', fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 26, lineHeight: 1, letterSpacing: '-.01em', color: t.TEXT }}>{fmtMonthShort(month)}</div>
+    </div>
+  );
+
   if (currencies.length === 0) {
     return (
       <div>
-        <MonthSwitcher month={month} setMonth={setMonth} />
-        <div style={{ color: t.TEXT_FAINT, textAlign: 'center', padding: 40 }}>Нет данных за месяц</div>
+        {Hero}
+        <MonthNav month={month} setMonth={setMonth} />
+        <div style={{ color: t.TEXT_FAINT, fontFamily: FONT_BODY, textAlign: 'center', padding: 40 }}>Нет данных за месяц</div>
       </div>
     );
   }
 
   return (
     <div>
-      <MonthSwitcher month={month} setMonth={setMonth} />
+      {Hero}
+      <MonthNav month={month} setMonth={setMonth} />
 
       {currencies.length > 1 && (
         <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-          {currencies.map((c) => (
-            <button key={c} onClick={() => setCur(c)} style={{
-              padding: '6px 12px', borderRadius: 20, cursor: 'pointer', fontWeight: 600, fontSize: 13,
-              border: `1px solid ${c === activeCur ? t.ACCENT : t.BORDER}`,
-              background: c === activeCur ? t.ACCENT : 'transparent',
-              color: c === activeCur ? '#fff' : t.TEXT_DIM,
-            }}>{c}</button>
-          ))}
+          {currencies.map((c) => {
+            const on = c === activeCur;
+            return (
+              <button key={c} onClick={() => setCur(c)} style={{
+                padding: '7px 17px', border: 'none', clipPath: CUT(8), cursor: 'pointer',
+                fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 10, letterSpacing: '.12em',
+                background: on ? t.ACCENT_GRAD : t.BG_RAISED,
+                color: on ? t.ON_ACCENT : t.TEXT_META,
+              }}>{c}</button>
+            );
+          })}
         </div>
       )}
 
-      {/* Баланс */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
-        <StatCard label="Доход" value={money(income, activeCur)} color={t.POSITIVE} />
-        <StatCard label="Расход" value={money(expense, activeCur)} color={t.ACCENT_SOFT} />
-        <StatCard label="Баланс" value={money(income - expense, activeCur)} color={income - expense >= 0 ? t.POSITIVE : t.ACCENT_SOFT} />
+      {/* Карточки */}
+      <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
+        <StatCard label="Доход" value={num(income, activeCur)} color={t.POSITIVE} />
+        <StatCard label="Расход" value={num(expense, activeCur)} color={t.ACCENT} />
+        <StatCard label="Баланс" value={`${income - expense >= 0 ? '+' : '−'}${num(Math.abs(income - expense), activeCur)}`} color={t.TEXT} />
       </div>
 
-      {/* Пирог расходов по категориям */}
+      {/* Пончик расходов */}
       {byCategory.length > 0 && (
-        <div style={{ background: t.BG_RAISED, border: `1px solid ${t.BORDER}`, borderRadius: 14, padding: 16, marginBottom: 16 }}>
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>Расходы по категориям</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={55} outerRadius={90} paddingAngle={2}>
-                {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} />)}
-              </Pie>
-              <Tooltip formatter={(v) => money(v, activeCur)}
-                contentStyle={{ background: t.BG_INPUT, border: `1px solid ${t.BORDER}`, borderRadius: 8, color: t.TEXT }} />
-            </PieChart>
-          </ResponsiveContainer>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+        <div style={{ position: 'relative', background: t.BG_HERO, clipPath: CUT_BR(20, 36), padding: '15px 16px 18px', marginBottom: 16, overflow: 'hidden' }}>
+          <div style={{ position: 'absolute', inset: 0, backgroundImage: HATCH('rgba(255,255,255,.03)', 12), pointerEvents: 'none' }} />
+          <div style={{ position: 'relative' }}><HudLabel>Расходы · категории</HudLabel></div>
+          <div style={{ position: 'relative', width: '100%', maxWidth: 320, margin: '0 auto' }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <PieChart>
+                <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={52} outerRadius={88} paddingAngle={2} stroke="none">
+                  {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} />)}
+                </Pie>
+                <Tooltip formatter={(v) => money(v, activeCur)}
+                  contentStyle={{ background: t.BG_INPUT, border: `1px solid ${t.BORDER}`, borderRadius: 0, clipPath: CUT(6), color: t.TEXT, fontFamily: FONT_MONO, fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6 }}>
             {byCategory.map((e, i) => (
-              <div key={e.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
-                <span style={{ width: 10, height: 10, borderRadius: 3, background: SERIES[i % SERIES.length] }} />
-                <span style={{ flex: 1, color: t.TEXT_DIM }}>{e.name}</span>
-                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{money(e.value, activeCur)}</span>
-                <span style={{ color: t.TEXT_FAINT, width: 44, textAlign: 'right' }}>
+              <div key={e.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderTop: `1px solid ${t.HAIR}` }}>
+                <span style={{ width: 9, height: 9, background: SERIES[i % SERIES.length] }} />
+                <span style={{ flex: 1, fontFamily: FONT_BODY, fontSize: 12, color: t.TEXT_DIM }}>{e.name}</span>
+                <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 11, color: t.TEXT, fontVariantNumeric: 'tabular-nums' }}>{num(e.value, activeCur)}</span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.TEXT_FAINT, width: 38, textAlign: 'right' }}>
                   {expense ? Math.round((e.value / expense) * 100) : 0}%
                 </span>
               </div>
@@ -418,12 +498,24 @@ function StatsTab({ txs, month, setMonth }) {
     </div>
   );
 }
+
+function MonthNav({ month, setMonth }) {
+  const t = useTheme();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px', marginBottom: 14 }}>
+      <button onClick={() => setMonth(shiftMonth(month, -1))} style={iconBtn(t)}><ChevronLeft size={20} /></button>
+      <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: '.14em', color: t.TEXT }}>{fmtMonthShort(month)}</span>
+      <button onClick={() => setMonth(shiftMonth(month, 1))} style={iconBtn(t)}><ChevronRight size={20} /></button>
+    </div>
+  );
+}
+
 function StatCard({ label, value, color }) {
   const t = useTheme();
   return (
-    <div style={{ flex: 1, background: t.BG_RAISED, border: `1px solid ${t.BORDER}`, borderRadius: 12, padding: '12px 10px' }}>
-      <div style={{ fontSize: 11, color: t.TEXT_FAINT, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 14, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+    <div style={{ flex: 1, background: t.BG_RAISED, padding: '11px 10px', borderLeft: `2px solid ${color}` }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 8, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT, marginBottom: 7 }}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
     </div>
   );
 }
@@ -531,31 +623,34 @@ function Main({ displayName }) {
     setTxs((prev) => prev.filter((x) => x.id !== id));
   }
 
-  if (loading) return <CenterScreen><Loader2 size={30} className="spin" /><span style={{ color: t.TEXT_DIM }}>Загрузка…</span></CenterScreen>;
-  if (error) return <CenterScreen><X size={30} color={t.ACCENT} /><span>{error}</span></CenterScreen>;
+  if (loading) return <CenterScreen><Loader2 size={30} className="spin" color={t.ACCENT} /><span style={{ color: t.TEXT_DIM, fontFamily: FONT_DISPLAY, letterSpacing: '.16em', fontSize: 12, textTransform: 'uppercase' }}>Загрузка…</span></CenterScreen>;
+  if (error) return <CenterScreen><X size={30} color={t.ACCENT} /><span style={{ fontFamily: FONT_BODY }}>{error}</span></CenterScreen>;
 
   return (
-    <div style={{ maxWidth: 560, margin: '0 auto', padding: '16px 14px 90px', color: t.TEXT }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
-        <Wallet size={24} color={t.ACCENT} />
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 800, fontSize: 18 }}>Финансы</div>
-          <div style={{ fontSize: 12, color: t.TEXT_FAINT }}>{displayName}</div>
+    <div style={{ maxWidth: 560, margin: '0 auto', padding: '14px 14px 96px', color: t.TEXT }}>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 16 }}>
+        <div style={{ width: 32, height: 32, background: t.ACCENT_GRAD, clipPath: CUT(8), display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+          <Wallet size={17} color={t.ON_ACCENT} />
         </div>
-        <span title="Данные зашифрованы" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: t.TEXT_FAINT }}>
-          <ShieldCheck size={15} color={t.POSITIVE} /> шифр
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 18, letterSpacing: '.03em' }}>ФИНАНСЫ</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '.14em', textTransform: 'uppercase', color: t.TEXT_FAINT, marginTop: 3 }}>{displayName || 'FIN·03'}</div>
+        </div>
+        <span title="Данные зашифрованы" style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: FONT_MONO, fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: t.TEXT_META }}>
+          <ShieldCheck size={13} color={t.POSITIVE} /> шифр
         </span>
       </header>
 
       {keyNotice && (
         <div style={{
-          background: t.BG_RAISED, border: `1px solid ${t.GOLD}`, borderRadius: 12, padding: 12,
-          marginBottom: 16, fontSize: 13, color: t.TEXT_DIM,
+          position: 'relative', background: t.BG_HERO, clipPath: CUT(12), padding: 13,
+          marginBottom: 16, fontFamily: FONT_BODY, fontSize: 13, color: t.TEXT_DIM, overflow: 'hidden',
         }}>
-          <b style={{ color: t.GOLD }}>Ключ шифрования создан.</b> Он хранится в Telegram и синхронизируется между твоими устройствами.
+          <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: t.ACCENT_GRAD }} />
+          <b style={{ color: t.GOLD, fontFamily: FONT_DISPLAY, letterSpacing: '.04em' }}>Ключ шифрования создан.</b> Он хранится в Telegram и синхронизируется между твоими устройствами.
           Если потеряешь доступ к Telegram-аккаунту — расшифровать данные будет нельзя.
-          <div style={{ marginTop: 8 }}>
-            <Btn variant="ghost" onClick={() => setKeyNotice(false)} style={{ padding: '6px 12px', fontSize: 13 }}>Понятно</Btn>
+          <div style={{ marginTop: 10 }}>
+            <Btn variant="ghost" onClick={() => setKeyNotice(false)} style={{ padding: '7px 14px', fontSize: 11 }}>Понятно</Btn>
           </div>
         </div>
       )}
@@ -566,21 +661,27 @@ function Main({ displayName }) {
       )}
       {tab === 'stats' && <StatsTab txs={txs} month={month} setMonth={setMonth} />}
 
-      {/* Нижняя навигация */}
+      {/* Нижняя навигация — плавающая пилюля */}
       <nav style={{
-        position: 'fixed', left: 0, right: 0, bottom: 0, background: t.BG_RAISED,
-        borderTop: `1px solid ${t.BORDER}`, display: 'flex',
-        paddingBottom: 'env(safe-area-inset-bottom)',
+        position: 'fixed', left: 0, right: 0, bottom: 0, padding: '10px 14px calc(15px + env(safe-area-inset-bottom))',
+        background: 'linear-gradient(to top,#080808 55%,transparent)',
       }}>
-        {[['ops', 'Операции', ListOrdered], ['stats', 'Статистика', BarChart3]].map(([k, lbl, Icon]) => (
-          <button key={k} onClick={() => setTab(k)} style={{
-            flex: 1, padding: '12px 0', background: 'transparent', border: 'none', cursor: 'pointer',
-            color: tab === k ? t.ACCENT : t.TEXT_FAINT, display: 'flex', flexDirection: 'column',
-            alignItems: 'center', gap: 3, fontSize: 11, fontWeight: 600,
-          }}>
-            <Icon size={20} /> {lbl}
-          </button>
-        ))}
+        <div style={{ display: 'flex', maxWidth: 560, margin: '0 auto', background: t.BG_RAISED, clipPath: CUT(14), padding: 4 }}>
+          {[['ops', 'Операции', ListOrdered], ['stats', 'Статистика', BarChart3]].map(([k, lbl, Icon]) => {
+            const on = tab === k;
+            return (
+              <button key={k} onClick={() => setTab(k)} style={{
+                flex: 1, padding: '10px 0', border: 'none', cursor: 'pointer',
+                background: on ? t.ACCENT_GRAD : 'transparent', clipPath: on ? CUT(10) : 'none',
+                color: on ? t.ON_ACCENT : t.TEXT_META, opacity: on ? 1 : 0.6,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                fontFamily: FONT_DISPLAY, fontSize: 10, fontWeight: 800, letterSpacing: '.1em', textTransform: 'uppercase',
+              }}>
+                <Icon size={16} /> {lbl}
+              </button>
+            );
+          })}
+        </div>
       </nav>
     </div>
   );
@@ -591,8 +692,8 @@ function Main({ displayName }) {
    ============================================================ */
 export default function App() {
   const tg = window.Telegram?.WebApp;
-  const scheme = tg?.colorScheme === 'light' ? 'light' : 'dark';
-  const theme = THEMES[scheme];
+  // Решение редизайна: единая тёмная тема Neo-Vectorheart
+  const theme = THEMES.dark;
 
   const [status, setStatus] = useState('init'); // init | ok | no-tg | error
   const [displayName, setDisplayName] = useState('');
@@ -601,7 +702,7 @@ export default function App() {
   useEffect(() => {
     document.body.style.background = theme.BG;
     document.body.style.margin = '0';
-    document.body.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    document.body.style.fontFamily = FONT_BODY;
   }, [theme]);
 
   useEffect(() => {
@@ -635,14 +736,20 @@ export default function App() {
 
   return (
     <ThemeContext.Provider value={theme}>
-      <style>{`.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-        *{-webkit-tap-highlight-color:transparent} input,select,button{font-family:inherit}`}</style>
-      {status === 'init' && <CenterScreen><Loader2 size={30} className="spin" /><span style={{ color: theme.TEXT_DIM }}>Вход…</span></CenterScreen>}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@600;700;800;900&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+        .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+        *{-webkit-tap-highlight-color:transparent} input,select,button{font-family:inherit}
+        body{background:${theme.BG}}
+      `}</style>
+      {status === 'init' && <CenterScreen><Loader2 size={30} className="spin" color={theme.ACCENT} /><span style={{ color: theme.TEXT_DIM, fontFamily: FONT_DISPLAY, letterSpacing: '.16em', fontSize: 12, textTransform: 'uppercase' }}>Вход…</span></CenterScreen>}
       {status === 'no-tg' && (
         <CenterScreen>
-          <Wallet size={40} color={theme.ACCENT} />
-          <div style={{ fontWeight: 700, fontSize: 18 }}>Финансы</div>
-          <div style={{ color: theme.TEXT_DIM, maxWidth: 320 }}>
+          <div style={{ width: 52, height: 52, background: theme.ACCENT_GRAD, clipPath: CUT(12), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Wallet size={26} color={theme.ON_ACCENT} />
+          </div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 20, letterSpacing: '.04em' }}>ФИНАНСЫ</div>
+          <div style={{ color: theme.TEXT_DIM, fontFamily: FONT_BODY, maxWidth: 320 }}>
             Приложение открывается только внутри Telegram — запусти его через бота.
           </div>
         </CenterScreen>
@@ -650,8 +757,8 @@ export default function App() {
       {status === 'error' && (
         <CenterScreen>
           <X size={36} color={theme.ACCENT} />
-          <div style={{ fontWeight: 700 }}>Не удалось войти</div>
-          <div style={{ color: theme.TEXT_DIM, fontSize: 14, maxWidth: 340 }}>{msg}</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, letterSpacing: '.04em', textTransform: 'uppercase' }}>Не удалось войти</div>
+          <div style={{ color: theme.TEXT_DIM, fontFamily: FONT_BODY, fontSize: 14, maxWidth: 340 }}>{msg}</div>
         </CenterScreen>
       )}
       {status === 'ok' && <Main displayName={displayName} />}
