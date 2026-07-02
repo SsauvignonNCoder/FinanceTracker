@@ -97,6 +97,42 @@ const fmtDate = (iso) => {
 };
 
 /* ============================================================
+   Курсы валют — ЦБ РФ. Рубль базовый; для остальных валют
+   показываем эквивалент в рублях. Источник: cbr-xml-daily.ru
+   (официальные данные Банка России, CORS-совместимый зеркало).
+   ============================================================ */
+let _ratesCache = null; // { rates: {CODE: рублей за 1 единицу}, date: 'DD.MM' }
+async function fetchRates() {
+  if (_ratesCache) return _ratesCache;
+  const res = await fetch('https://www.cbr-xml-daily.ru/daily_json.js');
+  if (!res.ok) throw new Error('rates-http');
+  const json = await res.json();
+  const rates = { RUB: 1 };
+  for (const [code, v] of Object.entries(json.Valute || {})) {
+    if (v && v.Value && v.Nominal) rates[code] = v.Value / v.Nominal; // рублей за 1 ед.
+  }
+  let date = '';
+  try { date = new Date(json.Date).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }); } catch { /* noop */ }
+  _ratesCache = { rates, date };
+  return _ratesCache;
+}
+function useRates() {
+  const [state, setState] = useState({ rates: null, date: '' });
+  useEffect(() => {
+    let alive = true;
+    fetchRates().then((r) => { if (alive) setState(r); }).catch(() => { /* курсы недоступны — конвертер скрыт */ });
+    return () => { alive = false; };
+  }, []);
+  return state;
+}
+// Пересчёт суммы из одной валюты в другую по курсам ЦБ (через рубль)
+function convert(amount, from, to, rates) {
+  if (!rates || !rates[from] || !rates[to]) return null;
+  return (amount * rates[from]) / rates[to];
+}
+const fmtRub = (v) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: v >= 1000 ? 0 : 2 }).format(v);
+
+/* ============================================================
    Примитивы UI
    ============================================================ */
 function Field({ label, children }) {
@@ -163,17 +199,31 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
   const [note, setNote] = useState(initial?.note || '');
   const [newCat, setNewCat] = useState('');
   const [busy, setBusy] = useState(false);
+  const { rates, date: ratesDate } = useRates();
 
   const catList = categories[kind] || [];
+
+  // Конвертер: рубль базовый → для не-RUB считаем эквивалент в ₽
+  const amountNum = Math.abs(parseFloat((amount || '').replace(',', '.')));
+  const rate = rates && currency !== 'RUB' ? rates[currency] : null;
+  const rubEquiv = rate && amountNum ? amountNum * rate : null;
+
+  // Ввод суммы: отрицательное значение автоматически помечает операцию как расход
+  function onAmountChange(v) {
+    setAmount(v);
+    const parsed = parseFloat(v.replace(',', '.'));
+    if (parsed < 0 && kind !== 'expense') { setKind('expense'); setCategory(''); }
+  }
 
   async function submit(e) {
     e.preventDefault();
     const n = parseFloat(amount.replace(',', '.'));
-    if (!n || n <= 0) return alert('Введи сумму больше нуля');
+    if (!n || isNaN(n)) return alert('Введи сумму');
     if (!category) return alert('Выбери категорию');
     setBusy(true);
     try {
-      await onSave({ kind, amount: n, currency, category, occurred_at: date, note: note.trim() });
+      // В БД сумма всегда положительная — знак выражается через kind
+      await onSave({ kind, amount: Math.abs(n), currency, category, occurred_at: date, note: note.trim() });
     } finally {
       setBusy(false);
     }
@@ -204,7 +254,7 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
       <div style={{ display: 'flex', gap: 10 }}>
         <div style={{ flex: 2 }}>
           <Field label="Сумма">
-            <input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)}
+            <input inputMode="decimal" value={amount} onChange={(e) => onAmountChange(e.target.value)}
               placeholder="0" style={{ ...inputStyle(t), fontFamily: FONT_MONO, fontWeight: 600 }} autoFocus />
           </Field>
         </div>
@@ -216,6 +266,24 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
           </Field>
         </div>
       </div>
+
+      {/* Конвертер валют (курс ЦБ РФ). Рубль базовый — показываем эквивалент в ₽ */}
+      {rate && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+          background: t.BG_HERO, clipPath: CUT(8), padding: '9px 12px', marginBottom: 12,
+          borderLeft: `2px solid ${t.ACCENT}`,
+        }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '.04em', color: t.TEXT_META }}>
+            1 {currency} = {fmtRub(rate)} ₽{ratesDate ? ` · ЦБ РФ ${ratesDate}` : ''}
+          </span>
+          {rubEquiv != null && (
+            <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13, color: t.TEXT, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+              ≈ {fmtRub(rubEquiv)} ₽
+            </span>
+          )}
+        </div>
+      )}
 
       <Field label="Категория">
         <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle(t)}>
@@ -233,7 +301,17 @@ function TxForm({ initial, categories, onCancel, onSave, onAddCategory }) {
       </div>
 
       <Field label="Дата">
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle(t), fontFamily: FONT_MONO }} />
+        <input
+          type="date"
+          value={date}
+          max={todayISO()}
+          onChange={(e) => { if (e.target.value && e.target.value <= todayISO()) setDate(e.target.value); }}
+          style={{
+            ...inputStyle(t), fontFamily: FONT_MONO, fontSize: 15,
+            textAlign: 'left', WebkitAppearance: 'none', appearance: 'none',
+            minHeight: 44, lineHeight: '22px', display: 'block',
+          }}
+        />
       </Field>
 
       <Field label="Заметка (необязательно)">
@@ -271,6 +349,7 @@ function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, o
   const t = useTheme();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
+  const atCurrentMonth = month >= monthKey(todayISO()); // нельзя листать дальше текущего месяца
 
   const monthTxs = txs.filter((x) => monthKey(x.occurred_at) === month)
     .sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
@@ -306,7 +385,7 @@ function OperationsTab({ txs, month, setMonth, categories, onCreate, onUpdate, o
         <div style={{ flex: 1, minWidth: 150, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px' }}>
           <button onClick={() => setMonth(shiftMonth(month, -1))} style={{ ...iconBtn(t), fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: t.TEXT_META }}>‹</button>
           <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 11, letterSpacing: '.16em', color: t.TEXT }}>{fmtMonthShort(month)}</span>
-          <button onClick={() => setMonth(shiftMonth(month, 1))} style={{ ...iconBtn(t), fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: t.TEXT_META }}>›</button>
+          <button disabled={atCurrentMonth} onClick={() => { if (!atCurrentMonth) setMonth(shiftMonth(month, 1)); }} style={{ ...iconBtn(t), fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: t.TEXT_META, opacity: atCurrentMonth ? 0.25 : 1, cursor: atCurrentMonth ? 'default' : 'pointer' }}>›</button>
         </div>
         {restCur.map(([cur, v]) => (
           <div key={cur} style={{ display: 'flex', alignItems: 'center', gap: 7, background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px' }}>
@@ -501,11 +580,12 @@ function StatsTab({ txs, month, setMonth }) {
 
 function MonthNav({ month, setMonth }) {
   const t = useTheme();
+  const atCurrentMonth = month >= monthKey(todayISO()); // не листаем в будущее
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: t.BG_RAISED, clipPath: CUT(9), padding: '8px 12px', marginBottom: 14 }}>
       <button onClick={() => setMonth(shiftMonth(month, -1))} style={iconBtn(t)}><ChevronLeft size={20} /></button>
       <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: '.14em', color: t.TEXT }}>{fmtMonthShort(month)}</span>
-      <button onClick={() => setMonth(shiftMonth(month, 1))} style={iconBtn(t)}><ChevronRight size={20} /></button>
+      <button disabled={atCurrentMonth} onClick={() => { if (!atCurrentMonth) setMonth(shiftMonth(month, 1)); }} style={{ ...iconBtn(t), opacity: atCurrentMonth ? 0.25 : 1, cursor: atCurrentMonth ? 'default' : 'pointer' }}><ChevronRight size={20} /></button>
     </div>
   );
 }
