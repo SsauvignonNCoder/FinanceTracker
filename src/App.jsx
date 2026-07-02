@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
 import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Sector,
 } from 'recharts';
 import {
   Wallet, Plus, TrendingUp, TrendingDown, Trash2, Pencil, X, Check,
@@ -743,9 +743,26 @@ function iconBtn(t) {
 /* ============================================================
    Вкладка «Статистика»
    ============================================================ */
+// Активный сектор пончика: крупнее и выдвинут из круга по направлению mid-angle
+function renderActiveSlice(props) {
+  const RAD = Math.PI / 180;
+  const { cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle, fill } = props;
+  const dx = Math.cos(-RAD * midAngle) * 10;
+  const dy = Math.sin(-RAD * midAngle) * 10;
+  return (
+    <g>
+      <Sector cx={cx + dx} cy={cy + dy} innerRadius={innerRadius} outerRadius={outerRadius + 10}
+        startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="none" />
+      <Sector cx={cx + dx} cy={cy + dy} innerRadius={outerRadius + 13} outerRadius={outerRadius + 15}
+        startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="none" opacity={0.55} />
+    </g>
+  );
+}
+
 function StatsTab({ txs, month, setMonth }) {
   const t = useTheme();
   const [cur, setCur] = useState(null);
+  const [activeIdx, setActiveIdx] = useState(null);
   const { rates } = useRates();
 
   const monthTxs = txs.filter((x) => monthKey(x.occurred_at) === month);
@@ -761,6 +778,9 @@ function StatsTab({ txs, month, setMonth }) {
     for (const x of curTxs.filter((x) => x.kind === 'expense')) acc[x.category] = (acc[x.category] || 0) + x.amount;
     return Object.entries(acc).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [curTxs]);
+
+  // Сброс выделенного сектора при смене валюты/месяца
+  useEffect(() => { setActiveIdx(null); }, [activeCur, month]);
 
   // Hero-заголовок
   const Hero = (
@@ -822,10 +842,12 @@ function StatsTab({ txs, month, setMonth }) {
           <div style={{ position: 'absolute', inset: 0, backgroundImage: HATCH('rgba(255,255,255,.03)', 12), pointerEvents: 'none' }} />
           <div style={{ position: 'relative' }}><HudLabel>Расходы · категории</HudLabel></div>
           <div style={{ position: 'relative', width: '100%', maxWidth: 320, margin: '0 auto' }}>
-            <ResponsiveContainer width="100%" height={200}>
+            <ResponsiveContainer width="100%" height={224}>
               <PieChart>
-                <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={52} outerRadius={88} paddingAngle={2} stroke="none">
-                  {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} />)}
+                <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={52} outerRadius={84} paddingAngle={2} stroke="none"
+                  activeIndex={activeIdx ?? undefined} activeShape={renderActiveSlice}
+                  onClick={(_, idx) => setActiveIdx((c) => (c === idx ? null : idx))}>
+                  {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} cursor="pointer" />)}
                 </Pie>
                 <Tooltip formatter={(v) => money(v, activeCur)}
                   cursor={{ fill: 'rgba(224,138,60,.08)' }}
@@ -837,9 +859,10 @@ function StatsTab({ txs, month, setMonth }) {
           </div>
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6 }}>
             {byCategory.map((e, i) => (
-              <div key={e.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderTop: `1px solid ${t.HAIR}` }}>
+              <div key={e.name} onClick={() => setActiveIdx((c) => (c === i ? null : i))}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px', borderTop: `1px solid ${t.HAIR}`, cursor: 'pointer', background: activeIdx === i ? 'rgba(224,138,60,.10)' : 'transparent' }}>
                 <span style={{ width: 9, height: 9, background: SERIES[i % SERIES.length] }} />
-                <span style={{ flex: 1, fontFamily: FONT_BODY, fontSize: 12, color: t.TEXT_DIM }}>{e.name}</span>
+                <span style={{ flex: 1, fontFamily: FONT_BODY, fontSize: 12, fontWeight: activeIdx === i ? 700 : 400, color: activeIdx === i ? t.TEXT : t.TEXT_DIM }}>{e.name}</span>
                 <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 11, color: t.TEXT, fontVariantNumeric: 'tabular-nums' }}>{num(e.value, activeCur)}</span>
                 <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.TEXT_FAINT, width: 38, textAlign: 'right' }}>
                   {expense ? Math.round((e.value / expense) * 100) : 0}%
