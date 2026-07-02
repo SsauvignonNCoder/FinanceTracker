@@ -210,147 +210,51 @@ function CenterScreen({ children }) {
 /* ============================================================
    Форма добавления/редактирования транзакции
    ============================================================ */
-function TxForm({ initial, categories, subcategories, onCancel, onSave, onAddCategory, onAddSubcategory }) {
+function TxForm({ initial, categories, subcategories, onCancel, onSubmit }) {
   const t = useTheme();
-  const [kind, setKind] = useState(initial?.kind || 'expense');
-  const [amount, setAmount] = useState(initial?.amount != null ? String(initial.amount) : '');
-  const [currency, setCurrency] = useState(initial?.currency || 'RUB');
-  const [category, setCategory] = useState(initial?.category || '');
-  const [subcategory, setSubcategory] = useState(initial?.subcategory || '');
-  const [date, setDate] = useState(initial?.occurred_at || todayISO());
-  const [note, setNote] = useState(initial?.note || '');
-  const [newCat, setNewCat] = useState('');
-  const [newSub, setNewSub] = useState('');
-  const [busy, setBusy] = useState(false);
+  const isEdit = !!initial;
   const { rates, date: ratesDate } = useRates();
+  const [date, setDate] = useState(initial?.occurred_at || todayISO());
+  const [busy, setBusy] = useState(false);
 
-  const catList = categories[kind] || [];
-  const subList = (subcategories?.[kind]?.[category]) || [];
+  // Форма поддерживает несколько позиций (микс доход/расход) → отдельные операции
+  const emptyLine = () => ({ id: Math.random().toString(36).slice(2), kind: 'expense', amount: '', currency: 'RUB', category: '', subcategory: '', note: '' });
+  const [lines, setLines] = useState(() => initial
+    ? [{ id: 'edit', kind: initial.kind || 'expense', amount: initial.amount != null ? String(initial.amount) : '', currency: initial.currency || 'RUB', category: initial.category || '', subcategory: initial.subcategory || '', note: initial.note || '' }]
+    : [emptyLine()]);
 
-  // Конвертер: рубль базовый → для не-RUB считаем эквивалент в ₽
-  const amountNum = Math.abs(parseFloat((amount || '').replace(',', '.')));
-  const rate = rates && currency !== 'RUB' ? rates[currency] : null;
-  const rubEquiv = rate && amountNum ? amountNum * rate : null;
-
-  // Ввод суммы: один разделитель «,», максимум 2 знака после запятой,
-  // допускается ведущий минус (авто-расход)
-  function sanitizeAmount(v) {
-    const neg = /^-/.test(v.trim());
-    let s = v.replace(/[^\d.,]/g, '').replace(/\./g, ','); // точку → запятую, лишнее убрать
-    const parts = s.split(',');
-    s = parts[0] + (parts.length > 1 ? ',' + parts.slice(1).join('').slice(0, 2) : '');
-    return (neg ? '-' : '') + s;
-  }
-  function onAmountChange(v) {
-    const clean = sanitizeAmount(v);
-    setAmount(clean);
-    if (clean.startsWith('-') && kind !== 'expense') { setKind('expense'); setCategory(''); setSubcategory(''); }
-  }
+  const patchLine = (id, patch) => setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const removeLine = (id) => setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.id !== id) : ls));
+  const addLine = () => setLines((ls) => [...ls, emptyLine()]);
 
   async function submit(e) {
     e.preventDefault();
-    const n = parseFloat(amount.replace(',', '.'));
-    if (!n || isNaN(n)) return alert('Введи сумму');
-    if (Math.abs(n) < 0.01) return alert('Сумма не может быть меньше 0,01');
-    if (!category) return alert('Выбери категорию');
-    setBusy(true);
-    try {
+    const prepared = [];
+    for (const l of lines) {
+      const n = parseFloat((l.amount || '').replace(',', '.'));
+      if (!n || isNaN(n)) return alert('Введи сумму во всех позициях');
+      if (Math.abs(n) < 0.01) return alert('Сумма не может быть меньше 0,01');
+      if (!l.category.trim()) return alert('Выбери категорию во всех позициях');
       // В БД сумма всегда положительная — знак выражается через kind
-      await onSave({ kind, amount: Math.abs(n), currency, category, subcategory: subcategory || '', occurred_at: date, note: note.trim() });
-    } finally {
-      setBusy(false);
+      prepared.push({ kind: l.kind, amount: Math.abs(n), currency: l.currency, category: l.category.trim(), subcategory: (l.subcategory || '').trim(), occurred_at: date, note: (l.note || '').trim() });
     }
+    setBusy(true);
+    try { await onSubmit(prepared); } finally { setBusy(false); }
   }
 
   return (
-    <form onSubmit={submit} style={{
-      background: t.BG_RAISED, clipPath: CUT(14), padding: 16, marginBottom: 16,
-    }}>
-      {/* Тип */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-        {[['expense', 'Расход', TrendingDown, t.ACCENT], ['income', 'Доход', TrendingUp, t.POSITIVE]].map(([k, lbl, Icon, col]) => {
-          const on = kind === k;
-          return (
-            <button key={k} type="button" onClick={() => { setKind(k); setCategory(''); setSubcategory(''); }} style={{
-              flex: 1, padding: '11px', border: 'none', clipPath: CUT(8), cursor: 'pointer',
-              fontWeight: 800, fontFamily: FONT_DISPLAY, letterSpacing: '.06em', textTransform: 'uppercase', fontSize: 12,
-              background: on ? (k === 'income' ? t.POSITIVE : t.ACCENT_GRAD) : t.BG_INPUT,
-              color: on ? t.ON_ACCENT : t.TEXT_DIM,
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            }}>
-              <Icon size={16} /> {lbl}
-            </button>
-          );
-        })}
-      </div>
+    <form onSubmit={submit} style={{ background: t.BG_RAISED, clipPath: CUT(14), padding: 16, marginBottom: 16 }}>
+      {lines.map((l, i) => (
+        <LineEditor key={l.id} line={l} index={i} total={lines.length}
+          categories={categories} subcategories={subcategories} rates={rates} ratesDate={ratesDate}
+          onPatch={(p) => patchLine(l.id, p)} onRemove={() => removeLine(l.id)}
+          canRemove={!isEdit && lines.length > 1} autoFocus={i === 0} />
+      ))}
 
-      <div style={{ display: 'flex', gap: 10 }}>
-        <div style={{ flex: 2 }}>
-          <Field label="Сумма">
-            <input inputMode="decimal" value={amount} onChange={(e) => onAmountChange(e.target.value)}
-              placeholder="0" style={{ ...inputStyle(t), fontFamily: FONT_MONO, fontWeight: 600 }} autoFocus />
-          </Field>
-        </div>
-        <div style={{ flex: 1 }}>
-          <Field label="Валюта">
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)} style={{ ...inputStyle(t), fontFamily: FONT_MONO }}>
-              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
-            </select>
-          </Field>
-        </div>
-      </div>
-
-      {/* Конвертер валют (курс ЦБ РФ). Рубль базовый — показываем эквивалент в ₽ */}
-      {rate && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
-          background: t.BG_HERO, clipPath: CUT(8), padding: '9px 12px', marginBottom: 12,
-          borderLeft: `2px solid ${t.ACCENT}`,
-        }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '.04em', color: t.TEXT_META }}>
-            1 {currency} = {fmtRub(rate)} ₽{ratesDate ? ` · ЦБ РФ ${ratesDate}` : ''}
-          </span>
-          {rubEquiv != null && (
-            <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13, color: t.TEXT, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-              ≈ {fmtRub(rubEquiv)} ₽
-            </span>
-          )}
-        </div>
-      )}
-
-      <Field label="Категория">
-        <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(''); }} style={inputStyle(t)}>
-          <option value="">— выбери —</option>
-          {catList.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </Field>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-        <input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="Новая категория"
-          style={{ ...inputStyle(t), flex: 1 }} />
-        <Btn variant="ghost" onClick={() => { if (newCat.trim()) { onAddCategory(kind, newCat.trim()); setCategory(newCat.trim()); setSubcategory(''); setNewCat(''); } }}>
-          <Plus size={16} />
+      {!isEdit && (
+        <Btn variant="ghost" onClick={addLine} style={{ width: '100%', marginBottom: 12 }}>
+          <Plus size={16} /> Ещё позиция
         </Btn>
-      </div>
-
-      {/* Подкатегория — опциональна, доступна после выбора категории */}
-      {category && (
-        <>
-          <Field label="Подкатегория · необязательно">
-            <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={inputStyle(t)}>
-              <option value="">— без подкатегории —</option>
-              {subList.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </Field>
-
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <input value={newSub} onChange={(e) => setNewSub(e.target.value)} placeholder="Новая подкатегория"
-              style={{ ...inputStyle(t), flex: 1 }} />
-            <Btn variant="ghost" onClick={() => { if (newSub.trim()) { onAddSubcategory(kind, category, newSub.trim()); setSubcategory(newSub.trim()); setNewSub(''); } }}>
-              <Plus size={16} />
-            </Btn>
-          </div>
-        </>
       )}
 
       <Field label="Дата">
@@ -367,17 +271,148 @@ function TxForm({ initial, categories, subcategories, onCancel, onSave, onAddCat
         />
       </Field>
 
-      <Field label="Заметка (необязательно)">
-        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Комментарий" style={inputStyle(t)} />
-      </Field>
-
       <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
         <Btn variant="ghost" onClick={onCancel} style={{ flex: 1 }}>Отмена</Btn>
         <Btn type="submit" disabled={busy} style={{ flex: 2 }}>
-          {busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />} Сохранить
+          {busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />} {isEdit ? 'Сохранить' : (lines.length > 1 ? `Сохранить · ${lines.length}` : 'Сохранить')}
         </Btn>
       </div>
     </form>
+  );
+}
+
+/* ============================================================
+   Combobox — поле с вводом и фильтруемым выпадающим списком.
+   Свободный ввод разрешён; новое значение сохраняется при отправке.
+   ============================================================ */
+function Combobox({ value, onChange, options, placeholder, autoFocus }) {
+  const t = useTheme();
+  const [open, setOpen] = useState(false);
+  const q = value || '';
+  const ql = q.trim().toLowerCase();
+  const filtered = options.filter((o) => o.toLowerCase().includes(ql));
+  const isNew = ql.length > 0 && !options.some((o) => o.toLowerCase() === ql);
+  const opt = { display: 'block', width: '100%', boxSizing: 'border-box', textAlign: 'left', border: 'none', background: 'transparent', color: t.TEXT, fontFamily: FONT_BODY, fontSize: 14, padding: '10px 11px', cursor: 'pointer' };
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        value={q} placeholder={placeholder} autoFocus={autoFocus}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 160)}
+        style={inputStyle(t)}
+      />
+      {open && (filtered.length > 0 || isNew) && (
+        <div style={{ position: 'absolute', zIndex: 40, left: 0, right: 0, top: 'calc(100% + 4px)', background: t.BG_INPUT, border: `1px solid ${t.BORDER}`, boxShadow: '0 16px 34px -12px rgba(0,0,0,.85)', maxHeight: 176, overflowY: 'auto' }}>
+          {isNew && (
+            <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => { onChange(q.trim()); setOpen(false); }}
+              style={{ ...opt, color: t.GOLD, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: '.04em' }}>
+              + Добавить «{q.trim()}»
+            </button>
+          )}
+          {filtered.map((o) => (
+            <button key={o} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => { onChange(o); setOpen(false); }}
+              style={{ ...opt, borderTop: `1px solid ${t.HAIR}` }}>{o}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Одна позиция в форме (тип, сумма, валюта, категория, подкатегория, заметка)
+   ============================================================ */
+function LineEditor({ line, index, total, categories, subcategories, rates, ratesDate, onPatch, onRemove, canRemove, autoFocus }) {
+  const t = useTheme();
+  const catList = categories[line.kind] || [];
+  const subList = (subcategories?.[line.kind]?.[line.category]) || [];
+
+  const amountNum = Math.abs(parseFloat((line.amount || '').replace(',', '.')));
+  const rate = rates && line.currency !== 'RUB' ? rates[line.currency] : null;
+  const rubEquiv = rate && amountNum ? amountNum * rate : null;
+
+  function sanitizeAmount(v) {
+    const neg = /^-/.test(v.trim());
+    let s = v.replace(/[^\d.,]/g, '').replace(/\./g, ',');
+    const p = s.split(',');
+    s = p[0] + (p.length > 1 ? ',' + p.slice(1).join('').slice(0, 2) : '');
+    return (neg ? '-' : '') + s;
+  }
+  function onAmount(v) {
+    const clean = sanitizeAmount(v);
+    const patch = { amount: clean };
+    if (clean.startsWith('-') && line.kind !== 'expense') { patch.kind = 'expense'; patch.category = ''; patch.subcategory = ''; }
+    onPatch(patch);
+  }
+
+  const multi = total > 1;
+  return (
+    <div style={{ background: multi ? t.BG_HERO : 'transparent', clipPath: multi ? CUT(10) : 'none', padding: multi ? '12px 12px 2px' : 0, marginBottom: multi ? 10 : 0 }}>
+      {multi && (
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+          <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 800, fontSize: 9, letterSpacing: '.16em', color: t.TEXT_FAINT }}>ПОЗИЦИЯ {String(index + 1).padStart(2, '0')}</span>
+          <span style={{ flex: 1 }} />
+          {canRemove && <button type="button" onClick={onRemove} style={iconBtn(t)}><X size={15} /></button>}
+        </div>
+      )}
+
+      {/* Тип */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        {[['expense', 'Расход', TrendingDown], ['income', 'Доход', TrendingUp]].map(([k, lbl, Icon]) => {
+          const on = line.kind === k;
+          return (
+            <button key={k} type="button" onClick={() => onPatch({ kind: k, category: '', subcategory: '' })} style={{
+              flex: 1, padding: '10px', border: 'none', clipPath: CUT(8), cursor: 'pointer',
+              fontWeight: 800, fontFamily: FONT_DISPLAY, letterSpacing: '.06em', textTransform: 'uppercase', fontSize: 11.5,
+              background: on ? (k === 'income' ? t.POSITIVE : t.ACCENT_GRAD) : t.BG_INPUT,
+              color: on ? t.ON_ACCENT : t.TEXT_DIM,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            }}>
+              <Icon size={15} /> {lbl}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ flex: 2 }}>
+          <Field label="Сумма">
+            <input inputMode="decimal" value={line.amount} onChange={(e) => onAmount(e.target.value)}
+              placeholder="0" autoFocus={autoFocus} style={{ ...inputStyle(t), fontFamily: FONT_MONO, fontWeight: 600 }} />
+          </Field>
+        </div>
+        <div style={{ flex: 1 }}>
+          <Field label="Валюта">
+            <select value={line.currency} onChange={(e) => onPatch({ currency: e.target.value })} style={{ ...inputStyle(t), fontFamily: FONT_MONO }}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
+            </select>
+          </Field>
+        </div>
+      </div>
+
+      {/* Конвертер: рубль базовый — эквивалент в ₽ по курсу ЦБ */}
+      {rate && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: t.BG_INPUT, clipPath: CUT(8), padding: '8px 11px', marginBottom: 12, borderLeft: `2px solid ${t.ACCENT}` }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: t.TEXT_META }}>1 {line.currency} = {fmtRub(rate)} ₽{ratesDate ? ` · ЦБ ${ratesDate}` : ''}</span>
+          {rubEquiv != null && <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12, color: t.TEXT, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>≈ {fmtRub(rubEquiv)} ₽</span>}
+        </div>
+      )}
+
+      <Field label="Категория">
+        <Combobox value={line.category} onChange={(v) => onPatch({ category: v, subcategory: '' })} options={catList} placeholder="Начни вводить или выбери" />
+      </Field>
+
+      {line.category.trim() && (
+        <Field label="Подкатегория · необязательно">
+          <Combobox value={line.subcategory} onChange={(v) => onPatch({ subcategory: v })} options={subList} placeholder="Начни вводить или выбери" />
+        </Field>
+      )}
+
+      <Field label="Заметка (необязательно)">
+        <input value={line.note} onChange={(e) => onPatch({ note: e.target.value })} placeholder="Комментарий" style={inputStyle(t)} />
+      </Field>
+    </div>
   );
 }
 
@@ -599,7 +634,7 @@ function Journal({ txs, month, onEdit, onDelete }) {
 /* ============================================================
    Вкладка «Операции»
    ============================================================ */
-function OperationsTab({ txs, month, setMonth, categories, subcategories, onCreate, onUpdate, onDelete, onAddCategory, onAddSubcategory }) {
+function OperationsTab({ txs, month, setMonth, categories, subcategories, onCreateMany, onUpdateOne, onDelete }) {
   const t = useTheme();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -658,13 +693,11 @@ function OperationsTab({ txs, month, setMonth, categories, subcategories, onCrea
 
       {adding && (
         <TxForm categories={categories} subcategories={subcategories} onCancel={() => setAdding(false)}
-          onAddCategory={onAddCategory} onAddSubcategory={onAddSubcategory}
-          onSave={async (data) => { await onCreate(data); setAdding(false); }} />
+          onSubmit={async (list) => { await onCreateMany(list); setAdding(false); }} />
       )}
       {editing && (
         <TxForm initial={editing} categories={categories} subcategories={subcategories} onCancel={() => setEditing(null)}
-          onAddCategory={onAddCategory} onAddSubcategory={onAddSubcategory}
-          onSave={async (data) => { await onUpdate(editing.id, data); setEditing(null); }} />
+          onSubmit={async (list) => { await onUpdateOne(editing.id, list[0]); setEditing(null); }} />
       )}
 
       {/* Бегущая строка курсов ЦБ (между «Новой операцией» и «Журналом») */}
@@ -914,16 +947,33 @@ function Main({ displayName }) {
     await supabase.from('app_settings').upsert({ user_id: userId, ...payload });
   }
 
-  async function addCategory(kind, name) {
-    if (categories[kind]?.includes(name)) return;
-    persistSettings({ ...categories, [kind]: [...(categories[kind] || []), name] }, subcategories);
+  // Досоздаёт отсутствующие категории/подкатегории из набора операций (одна запись в БД)
+  async function ensureCats(list) {
+    let nextCats = categories, nextSubs = subcategories, changed = false;
+    for (const d of list) {
+      if (d.category && !(nextCats[d.kind] || []).includes(d.category)) {
+        nextCats = { ...nextCats, [d.kind]: [...(nextCats[d.kind] || []), d.category] };
+        changed = true;
+      }
+      if (d.subcategory) {
+        const cur = nextSubs[d.kind]?.[d.category] || [];
+        if (!cur.includes(d.subcategory)) {
+          nextSubs = { ...nextSubs, [d.kind]: { ...(nextSubs[d.kind] || {}), [d.category]: [...cur, d.subcategory] } };
+          changed = true;
+        }
+      }
+    }
+    if (changed) await persistSettings(nextCats, nextSubs);
   }
 
-  async function addSubcategory(kind, category, name) {
-    const cur = subcategories?.[kind]?.[category] || [];
-    if (cur.includes(name)) return;
-    const nextSubs = { ...subcategories, [kind]: { ...(subcategories[kind] || {}), [category]: [...cur, name] } };
-    persistSettings(categories, nextSubs);
+  // Создать несколько операций сразу (микс доход/расход)
+  async function createMany(list) {
+    await ensureCats(list);
+    for (const d of list) await createTx(d);
+  }
+  async function updateOne(id, d) {
+    await ensureCats([d]);
+    await updateTx(id, d);
   }
 
   async function createTx(data) {
@@ -994,7 +1044,7 @@ function Main({ displayName }) {
 
       {tab === 'ops' && (
         <OperationsTab txs={txs} month={month} setMonth={setMonth} categories={categories} subcategories={subcategories}
-          onCreate={createTx} onUpdate={updateTx} onDelete={deleteTx} onAddCategory={addCategory} onAddSubcategory={addSubcategory} />
+          onCreateMany={createMany} onUpdateOne={updateOne} onDelete={deleteTx} />
       )}
       {tab === 'stats' && <StatsTab txs={txs} month={month} setMonth={setMonth} />}
 
