@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, createContext, useContext, useCallback } from 'react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Sector,
 } from 'recharts';
@@ -743,18 +743,21 @@ function iconBtn(t) {
 /* ============================================================
    Вкладка «Статистика»
    ============================================================ */
-// Активный сектор пончика: крупнее и выдвинут из круга по направлению mid-angle
-function renderActiveSlice(props) {
+// Активный сектор пончика: крупнее и выдвинут из круга. pop (0..1) — фаза анимации.
+function renderActiveSlice(props, pop = 1) {
   const RAD = Math.PI / 180;
   const { cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle, fill } = props;
-  const dx = Math.cos(-RAD * midAngle) * 10;
-  const dy = Math.sin(-RAD * midAngle) * 10;
+  const dx = Math.cos(-RAD * midAngle) * 10 * pop;
+  const dy = Math.sin(-RAD * midAngle) * 10 * pop;
+  const grow = 10 * pop;
   return (
     <g>
-      <Sector cx={cx + dx} cy={cy + dy} innerRadius={innerRadius} outerRadius={outerRadius + 10}
+      <Sector cx={cx + dx} cy={cy + dy} innerRadius={innerRadius} outerRadius={outerRadius + grow}
         startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="none" />
-      <Sector cx={cx + dx} cy={cy + dy} innerRadius={outerRadius + 13} outerRadius={outerRadius + 15}
-        startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="none" opacity={0.55} />
+      {pop > 0.35 && (
+        <Sector cx={cx + dx} cy={cy + dy} innerRadius={outerRadius + grow + 3} outerRadius={outerRadius + grow + 5}
+          startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="none" opacity={0.5 * pop} />
+      )}
     </g>
   );
 }
@@ -763,7 +766,26 @@ function StatsTab({ txs, month, setMonth }) {
   const t = useTheme();
   const [cur, setCur] = useState(null);
   const [activeIdx, setActiveIdx] = useState(null);
+  const [pop, setPop] = useState(0);
+  const popRef = useRef(0);
   const { rates } = useRates();
+
+  // Плавный выезд активного сектора (easeOutCubic)
+  useEffect(() => {
+    const to = activeIdx != null ? 1 : 0;
+    const from = activeIdx != null ? 0 : popRef.current;
+    const dur = 280; const start = performance.now();
+    let raf;
+    const ease = (k) => 1 - Math.pow(1 - k, 3);
+    const tick = (now) => {
+      const k = Math.min(1, (now - start) / dur);
+      const v = from + (to - from) * ease(k);
+      popRef.current = v; setPop(v);
+      if (k < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [activeIdx]);
 
   const monthTxs = txs.filter((x) => monthKey(x.occurred_at) === month);
   const currencies = [...new Set(monthTxs.map((x) => x.currency))];
@@ -836,6 +858,28 @@ function StatsTab({ txs, month, setMonth }) {
         );
       })()}
 
+      {/* Накопительный баланс — сумма всех операций вплоть до выбранного месяца */}
+      {(() => {
+        const cum = txs.filter((x) => x.currency === activeCur && monthKey(x.occurred_at) <= month)
+          .reduce((s, x) => s + (x.kind === 'income' ? x.amount : -x.amount), 0);
+        const pos = cum >= 0;
+        const usdV = activeCur === 'RUB' && rates && rates.USD ? convert(Math.abs(cum), 'RUB', 'USD', rates) : null;
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: t.BG_RAISED, clipPath: CUT(9), padding: '11px 14px', marginBottom: 14, borderLeft: `3px solid ${pos ? t.POSITIVE : t.ACCENT}` }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 8.5, letterSpacing: '.16em', textTransform: 'uppercase', color: t.TEXT_FAINT }}>Накопительный баланс</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '.06em', color: t.TEXT_FAINT, marginTop: 3 }}>С НАЧАЛА ДО {fmtMonthShort(month)}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 700, color: pos ? t.POSITIVE : t.ACCENT, fontVariantNumeric: 'tabular-nums' }}>
+                {pos ? '+' : '−'}{num(Math.abs(cum), activeCur)} <span style={{ fontSize: 11, color: t.TEXT_META }}>{activeCur}</span>
+              </div>
+              {usdV != null && <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: t.TEXT_FAINT, marginTop: 2 }}>≈ ${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(usdV)}</div>}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Пончик расходов */}
       {byCategory.length > 0 && (
         <div style={{ position: 'relative', background: t.BG_HERO, clipPath: CUT_BR(20, 36), padding: '15px 16px 18px', marginBottom: 16, overflow: 'hidden' }}>
@@ -845,7 +889,8 @@ function StatsTab({ txs, month, setMonth }) {
             <ResponsiveContainer width="100%" height={224}>
               <PieChart>
                 <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={52} outerRadius={84} paddingAngle={2} stroke="none"
-                  activeIndex={activeIdx ?? undefined} activeShape={renderActiveSlice}
+                  isAnimationActive={false}
+                  activeIndex={activeIdx ?? undefined} activeShape={(p) => renderActiveSlice(p, pop)}
                   onClick={(_, idx) => setActiveIdx((c) => (c === idx ? null : idx))}>
                   {byCategory.map((e, i) => <Cell key={i} fill={SERIES[i % SERIES.length]} cursor="pointer" />)}
                 </Pie>
